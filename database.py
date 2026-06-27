@@ -176,6 +176,17 @@ def get_signals_for_event(event_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def all_signals(strategy: str = "signal_tm") -> list[dict]:
+    """Все записи стратегии для выгрузки в Excel (прошедшие формулу + снимки перерыва),
+    новые сверху."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM signals WHERE strategy=? ORDER BY created_at DESC, id DESC",
+        (strategy,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def update_signal_result(signal_id: int, result: str | None,
                          final_score: str, final_total: int, profit: float | None):
     conn = _conn()

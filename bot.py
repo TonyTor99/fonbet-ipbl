@@ -17,6 +17,7 @@ import database
 import signals
 import collector_db
 import export_prime
+import export_signals
 from config import BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS
 
 DIR = Path(__file__).parent
@@ -117,6 +118,13 @@ def sched_kb() -> InlineKeyboardMarkup:
                                           callback_data=f"setsched:{code}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(rows)
+
+
+def stats_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Выгрузить сигналы (Excel)", callback_data="export_sig")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
 
 
 def collector_kb() -> InlineKeyboardMarkup:
@@ -252,7 +260,30 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
 
     elif data == "stats":
-        await q.edit_message_text(stats_text(), parse_mode="HTML", reply_markup=back_kb())
+        await q.edit_message_text(stats_text(), parse_mode="HTML", reply_markup=stats_kb())
+
+    elif data == "export_sig":
+        await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"signals_tm_{ts}.xlsx"
+        try:
+            n = export_signals.build(str(path))
+            if n == 0:
+                await ctx.bot.send_message(q.message.chat_id, "📊 Сигналов пока нет — нечего выгружать.")
+            else:
+                with open(path, "rb") as fp:
+                    await ctx.bot.send_document(
+                        chat_id=q.message.chat_id, document=fp, filename=path.name,
+                        caption=f"📊 ТМ-сигналы · записей {n}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, stats_text(),
+                                   parse_mode="HTML", reply_markup=stats_kb())
 
     elif data == "collector":
         await q.edit_message_text(collector_text(), parse_mode="HTML",
