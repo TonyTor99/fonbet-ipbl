@@ -139,12 +139,13 @@ def extract_totals(api_data: Optional[dict], root_id: int) -> list[dict]:
 # Цикл
 # ---------------------------------------------------------------------------
 
-def _finalize(eid: int):
+def _finalize(eid: int, comment: str = ""):
     s1, s2 = _last_score.get(eid, (0, 0))
     final_total = s1 + s2
     final_score = f"{s1}:{s2}"
+    quarters = parse_quarters(comment or _last_comment.get(eid, ""))
     log.info("finalize ev=%s %s (тотал %s)", eid, final_score, final_total)
-    signals.resolve(eid, final_score, final_total)
+    signals.resolve(eid, final_score, final_total, quarters)
     collector.resolve(eid, s1, s2)
     _known.pop(eid, None)
     _last_score.pop(eid, None)
@@ -190,7 +191,7 @@ def run_cycle() -> list[dict]:
                 s1 = int(miscs[eid].get("score1", 0) or 0)
                 s2 = int(miscs[eid].get("score2", 0) or 0)
                 _last_score[eid] = (s1, s2)
-                _finalize(eid)
+                _finalize(eid, miscs[eid].get("comment", ""))
         else:
             _miss[eid] = _miss.get(eid, 0) + 1
             if _miss[eid] >= GRACE_CYCLES:

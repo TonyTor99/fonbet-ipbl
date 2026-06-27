@@ -142,6 +142,22 @@ def fmt_profit(v) -> str:
     return f"{float(v):+.0f}"
 
 
+def quarter_str(quarters: list, idx: int) -> str | None:
+    """Счёт четверти idx (0-based) как '24:24' или None, если четверти ещё нет."""
+    if 0 <= idx < len(quarters):
+        a, b = quarters[idx]
+        return f"{a}:{b}"
+    return None
+
+
+def prematch_line(hist: list) -> float | None:
+    """Первая увиденная (лайв-старт) линия ТМ или None."""
+    for v in hist:
+        if v is not None:
+            return v
+    return None
+
+
 def fmt_line_move(hist: list, current: float | None) -> str:
     """Движение линии ставки: '188,5 → 185,5'. Без движения — одно значение."""
     vals = [h for h in hist if h is not None]
@@ -234,7 +250,12 @@ def _base_sig(strategy: str, st: dict, state: dict) -> dict:
         "fixed_score1": state["score1"],
         "fixed_score2": state["score2"],
         "fixed_quarters": fmt_quarters(state["quarters"]),
+        "q1": quarter_str(state["quarters"], 0),   # Q1 — известен на сигнале
+        "q2": quarter_str(state["quarters"], 1),   # Q2 — известен на сигнале
+        "q3": None,                                # Q3/Q4 — заполнятся на финале
+        "q4": None,
         "line_move": None,
+        "line_prematch": prematch_line(st["line_hist"]),
         "chat_id": None,
         "message_id": None,
         "status": "not_sent",
@@ -352,8 +373,11 @@ def process_match(state: dict):
         log.warning("prime_info err ev=%s: %s", eid, e)
 
 
-def resolve(event_id: int, final_score: str, final_total: int):
-    """Дорасчёт итогов сигналов ТМ и редактирование сообщений."""
+def resolve(event_id: int, final_score: str, final_total: int, quarters: list | None = None):
+    """Дорасчёт итогов сигналов ТМ и редактирование сообщений.
+    quarters — полный список четвертей из итогового comment (для Q3/Q4)."""
+    q3 = quarter_str(quarters or [], 2)
+    q4 = quarter_str(quarters or [], 3)
     try:
         for sig in database.get_signals_for_event(event_id):
             if sig["strategy"] != "signal_tm":
@@ -367,7 +391,7 @@ def resolve(event_id: int, final_score: str, final_total: int):
                 profit = STAKE * (sig["odds"] - 1) if won else -STAKE
             else:
                 profit = None
-            database.update_signal_result(sig["id"], result, final_score, final_total, profit)
+            database.update_signal_result(sig["id"], result, final_score, final_total, profit, q3, q4)
             if sig["status"] == "sent" and sig["message_id"] and sig["chat_id"] is not None:
                 s2 = dict(sig)
                 s2.update(result=result, final_score=final_score,

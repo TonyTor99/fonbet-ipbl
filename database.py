@@ -43,8 +43,13 @@ def init_db():
             totals_snapshot TEXT,                 -- весь блок ТМ на перерыве "219.5@2.1|220.5@1.87|..."
             fixed_score1  INTEGER NOT NULL,
             fixed_score2  INTEGER NOT NULL,
-            fixed_quarters TEXT,                  -- "18:29 | 18:18"
+            fixed_quarters TEXT,                  -- "18:29 | 18:18" (текст, Q1|Q2 на сигнале)
+            q1            TEXT,                   -- счёт Q1 "24:24" (на сигнале)
+            q2            TEXT,                   -- счёт Q2 (на сигнале)
+            q3            TEXT,                   -- счёт Q3 (заполняется на финале)
+            q4            TEXT,                   -- счёт Q4 (заполняется на финале)
             line_move     TEXT,                   -- движение линии ставки "188,5 → 185,5"
+            line_prematch REAL,                   -- первая увиденная (лайв-старт) линия ТМ
             chat_id       INTEGER,
             message_id    INTEGER,
             status        TEXT NOT NULL,          -- sent / not_sent / info
@@ -71,6 +76,11 @@ def init_db():
         ("in_window", "ALTER TABLE signals ADD COLUMN in_window INTEGER NOT NULL DEFAULT 1"),
         ("totals_snapshot", "ALTER TABLE signals ADD COLUMN totals_snapshot TEXT"),
         ("line_move", "ALTER TABLE signals ADD COLUMN line_move TEXT"),
+        ("q1", "ALTER TABLE signals ADD COLUMN q1 TEXT"),
+        ("q2", "ALTER TABLE signals ADD COLUMN q2 TEXT"),
+        ("q3", "ALTER TABLE signals ADD COLUMN q3 TEXT"),
+        ("q4", "ALTER TABLE signals ADD COLUMN q4 TEXT"),
+        ("line_prematch", "ALTER TABLE signals ADD COLUMN line_prematch REAL"),
         ("windows", "ALTER TABLE bot_config ADD COLUMN windows TEXT"),
     ]:
         try:
@@ -153,12 +163,14 @@ def insert_signal(sig: dict) -> int | None:
             INSERT INTO signals
                 (strategy, event_id, league, division, team1, team2, side, line, odds,
                  half_total, formula_value, qualified, in_window, totals_snapshot,
-                 fixed_score1, fixed_score2, fixed_quarters, line_move,
+                 fixed_score1, fixed_score2, fixed_quarters, q1, q2, q3, q4,
+                 line_move, line_prematch,
                  chat_id, message_id, status, result, final_score, final_total, profit, created_at)
             VALUES
                 (:strategy, :event_id, :league, :division, :team1, :team2, :side, :line, :odds,
                  :half_total, :formula_value, :qualified, :in_window, :totals_snapshot,
-                 :fixed_score1, :fixed_score2, :fixed_quarters, :line_move,
+                 :fixed_score1, :fixed_score2, :fixed_quarters, :q1, :q2, :q3, :q4,
+                 :line_move, :line_prematch,
                  :chat_id, :message_id, :status, :result, :final_score, :final_total, :profit, :created_at)
         """, sig)
         conn.commit()
@@ -188,11 +200,12 @@ def all_signals(strategy: str = "signal_tm") -> list[dict]:
 
 
 def update_signal_result(signal_id: int, result: str | None,
-                         final_score: str, final_total: int, profit: float | None):
+                         final_score: str, final_total: int, profit: float | None,
+                         q3: str | None = None, q4: str | None = None):
     conn = _conn()
     conn.execute(
-        "UPDATE signals SET result=?, final_score=?, final_total=?, profit=? WHERE id=?",
-        (result, final_score, final_total, profit, signal_id),
+        "UPDATE signals SET result=?, final_score=?, final_total=?, profit=?, q3=?, q4=? WHERE id=?",
+        (result, final_score, final_total, profit, q3, q4, signal_id),
     )
     conn.commit()
     conn.close()
