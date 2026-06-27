@@ -142,20 +142,22 @@ def panel_text() -> str:
 
 
 def stats_text() -> str:
-    lines = ["🤖 <b>Статистика стратегий</b>", f"Старт. баланс: {BANKROLL_START:,}".replace(",", " ") + "₽", ""]
+    bal0 = f"{BANKROLL_START:,.0f}".replace(",", " ")
+    lines = ["📊 <b>СТАТИСТИКА СТРАТЕГИЙ</b>", "", f"💰 Стартовый баланс: {bal0}₽"]
     for code, name in STRATEGIES.items():
         s = database.bot_stats(code)
-        lines.append(f"<b>{name}</b>")
+        lines += ["", "", f"🤖 <b>{name.upper()}</b>", ""]
         if code == "prime_info":
-            lines.append(f"  уведомлений в перерыве: {s['matches']}")
+            lines.append(f"🔔 Уведомлений в перерыве: {s['matches']}")
         else:
-            lines.append(f"  перерывов: {s['matches']} | сигналов: {s['signals']} | "
-                         f"✅ {s['wins']} | ❌ {s['losses']} | без итога: {s['no_result']}")
+            lines.append(f"📌 Перерывов: {s['matches']} | Сигналов: {s['signals']}")
+            lines.append(f"✅ Плюсовые: {s['wins']} | ❌ Минусовые: {s['losses']} | ⏸️ Без итога: {s['no_result']}")
             if s["wins"] + s["losses"] > 0:
-                lines.append(f"  винрейт: {s['winrate']:.0f}% | ROI: {s['roi']:+.1f}% "
-                             f"| прибыль: {money(s['profit'])}")
-                lines.append(f"  баланс: {s['balance']:,.0f}".replace(",", " ") + "₽")
-        lines.append("")
+                bal = f"{s['balance']:,.0f}".replace(",", " ")
+                lines.append(f"📈 Винрейт: {s['winrate']:.0f}%")
+                lines.append(f"🧮 ROI: {s['roi']:+.1f}%")
+                lines.append(f"💰 Прибыль: {money(s['profit'])}")
+                lines.append(f"🏦 Баланс: {bal}₽")
     return "\n".join(lines)
 
 
