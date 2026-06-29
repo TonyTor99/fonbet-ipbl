@@ -117,6 +117,25 @@ def fmt_odds(o) -> str:
     return f"{float(o):.2f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
+# Варианты с точкой (для строки ставки «ТМ» и «Запас» — по эталону клиента).
+def fmt_line_dot(line: float | None) -> str:
+    if line is None:
+        return "—"
+    if line == int(line):
+        return str(int(line))
+    return f"{line:.1f}"
+
+
+def fmt_odds_dot(o) -> str:
+    if o is None:
+        return "—"
+    return f"{float(o):.2f}".rstrip("0").rstrip(".")
+
+
+def fmt_signed1_dot(v) -> str:
+    return f"{float(v):.1f}"
+
+
 def fmt_quarters(quarters: list) -> str:
     """Кварталы для строки 🔢: '18:29 | 18:18'."""
     return " | ".join(f"{a}:{b}" for a, b in quarters[:2])
@@ -175,30 +194,35 @@ def fmt_totals_snapshot(totals: list[dict]) -> str:
     return "|".join(f"{fmt_line(t['line'])}@{fmt_odds(t['odds'])}" for t in tm)
 
 
+def fmt_teams(team1: str, team2: str) -> str:
+    """Команды через дефис, каждая в <code> — копируется по тапу в Telegram."""
+    return f"⚔️<code>{html.escape(team1)}</code> - <code>{html.escape(team2)}</code>"
+
+
 def render_signal(sig: dict) -> str:
     league = html.escape(fmt_league(sig["league"]))
     lines = [
         "🏀 <b>ТМ СИГНАЛ</b>",
         f"🏆 {league}",
-        f"⚔️{html.escape(sig['team1'])} - {html.escape(sig['team2'])}",
+        fmt_teams(sig["team1"], sig["team2"]),
         "",
         "⏸️ Перерыв",
-        f"📊 Счёт {sig['fixed_score1']}:{sig['fixed_score2']}",
+        f"📊 <b>Счёт {sig['fixed_score1']}:{sig['fixed_score2']}</b>",
     ]
     if sig.get("fixed_quarters"):
         lines.append(f"🔢 {html.escape(sig['fixed_quarters'])}")
     lines.append("")
-    odds_part = f" @{fmt_odds(sig['odds'])}" if sig.get("odds") is not None else ""
-    lines.append(f"🎯 <b>ТМ {fmt_line(sig['line'])}</b>{odds_part}")
+    odds_part = f" @{fmt_odds_dot(sig['odds'])}" if sig.get("odds") is not None else ""
+    lines.append(f"🎯 <b>ТМ {fmt_line_dot(sig['line'])}{odds_part}</b>")
     if sig.get("line_move"):
         lines.append(f"📈 Линия: {html.escape(sig['line_move'])}")
     if sig.get("formula_value") is not None:
-        lines.append(f"🧮 Запас: <b>{fmt_signed1(sig['formula_value'])}</b>")
+        lines.append(f"🧮 <b>Запас:  {fmt_signed1_dot(sig['formula_value'])}</b>")
     if sig.get("final_score"):
         lines.append("")
         tot = sig.get("final_total")
         tot_part = f"  ({tot})" if tot is not None else ""
-        lines.append(f"🏁 Итог: <b>{html.escape(str(sig['final_score']))}</b>{tot_part}")
+        lines.append(f"🏁 <b>Итог: {html.escape(str(sig['final_score']))}{tot_part}</b>")
         if sig.get("result") == "Выигрыш":
             lines.append(f"✅ <b>Выигрыш</b>  {fmt_profit(sig['profit'])}")
         elif sig.get("result") == "Проигрыш":
@@ -211,21 +235,21 @@ def render_info(sig: dict) -> str:
     lines = [
         "🏀 <b>PRIME • ПЕРЕРЫВ</b>",
         f"🏆 {league}",
-        f"⚔️{html.escape(sig['team1'])} - {html.escape(sig['team2'])}",
+        fmt_teams(sig["team1"], sig["team2"]),
         "",
         "⏸️ Перерыв",
-        f"📊 Счёт {sig['fixed_score1']}:{sig['fixed_score2']}",
+        f"📊 <b>Счёт {sig['fixed_score1']}:{sig['fixed_score2']}</b>",
     ]
     if sig.get("fixed_quarters"):
         lines.append(f"🔢 {html.escape(sig['fixed_quarters'])}")
     lines.append("")
     if sig.get("line") is not None:
-        odds_part = f" @{fmt_odds(sig['odds'])}" if sig.get("odds") is not None else ""
-        lines.append(f"🎯 <b>ТМ {fmt_line(sig['line'])}</b>{odds_part}")
+        odds_part = f" @{fmt_odds_dot(sig['odds'])}" if sig.get("odds") is not None else ""
+        lines.append(f"🎯 <b>ТМ {fmt_line_dot(sig['line'])}{odds_part}</b>")
     if sig.get("line_move"):
         lines.append(f"📈 Линия: {html.escape(sig['line_move'])}")
     if sig.get("formula_value") is not None:
-        lines.append(f"🧮 Запас: <b>{fmt_signed1(sig['formula_value'])}</b>")
+        lines.append(f"🧮 <b>Запас:  {fmt_signed1_dot(sig['formula_value'])}</b>")
     return "\n".join(lines)
 
 
