@@ -17,7 +17,8 @@ import collector_db
 
 # (Заголовок, ключ строки БД). None-ключ -> спец-обработка ниже.
 COLUMNS = [
-    ("Дата-время МСК", "snap_dt_msk"),
+    ("Дата МСК", "__date"),
+    ("Время МСК", "__time"),
     ("Лига", "league"),
     ("Команда 1", "team1"),
     ("Команда 2", "team2"),
@@ -25,6 +26,7 @@ COLUMNS = [
     ("Четверть", "quarter"),
     ("Счёт", "__score"),
     ("Фора К1", "fora_line"),
+    ("Фора К2", "__fora2_line"),
     ("Фора П1 кф", "fora1_odds"),
     ("Фора П1", "r_fora1"),
     ("Фора П2 кф", "fora2_odds"),
@@ -35,15 +37,15 @@ COLUMNS = [
     ("ТМ кф", "total_m_odds"),
     ("ТМ", "r_total_m"),
     ("ИТ1", "it1_line"),
-    ("ИТ1 Б кф", "it1_b_odds"),
-    ("ИТ1 Б", "r_it1_b"),
-    ("ИТ1 М кф", "it1_m_odds"),
-    ("ИТ1 М", "r_it1_m"),
+    ("ИТБ1 КФ", "it1_b_odds"),
+    ("ИТБ1 Р", "r_it1_b"),
+    ("ИТМ1 КФ", "it1_m_odds"),
+    ("ИТМ1 Р", "r_it1_m"),
     ("ИТ2", "it2_line"),
-    ("ИТ2 Б кф", "it2_b_odds"),
-    ("ИТ2 Б", "r_it2_b"),
-    ("ИТ2 М кф", "it2_m_odds"),
-    ("ИТ2 М", "r_it2_m"),
+    ("ИТБ2 КФ", "it2_b_odds"),
+    ("ИТБ2 Р", "r_it2_b"),
+    ("ИТМ2 КФ", "it2_m_odds"),
+    ("ИТМ2 Р", "r_it2_m"),
     ("П1 кф", "win1_odds"),
     ("П1", "r_win1"),
     ("П2 кф", "win2_odds"),
@@ -64,6 +66,14 @@ RESULT_KEYS = {h for h, k in COLUMNS if k and k.startswith("r_")}
 def _value(row: dict, key: str):
     if key == "__score":
         return f"{row['score1']}:{row['score2']}"
+    if key == "__date":
+        return (row.get("snap_dt_msk") or "").split(" ")[0] or None
+    if key == "__time":
+        parts = (row.get("snap_dt_msk") or "").split(" ")
+        return parts[1] if len(parts) > 1 else None
+    if key == "__fora2_line":
+        fl = row.get("fora_line")
+        return -fl if fl is not None else None
     return row.get(key)
 
 
