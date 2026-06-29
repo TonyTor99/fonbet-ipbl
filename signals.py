@@ -195,18 +195,18 @@ def fmt_totals_snapshot(totals: list[dict]) -> str:
 
 
 def fmt_teams(team1: str, team2: str) -> str:
-    """Команды через дефис, каждая в <code> — копируется по тапу в Telegram."""
-    return f"⚔️<code>{html.escape(team1)}</code> - <code>{html.escape(team2)}</code>"
+    """Обе команды в одном <code> — копируются одним тапом в Telegram."""
+    return f"⚔️<code>{html.escape(team1)} - {html.escape(team2)}</code>"
 
 
 def render_signal(sig: dict) -> str:
     league = html.escape(fmt_league(sig["league"]))
     lines = [
         "🏀 <b>ТМ СИГНАЛ</b>",
-        f"🏆 {league}",
+        f"🏆 <b>{league}</b>",
         fmt_teams(sig["team1"], sig["team2"]),
         "",
-        "⏸️ Перерыв",
+        "⏸️ <b>Перерыв</b>",
         f"📊 <b>Счёт {sig['fixed_score1']}:{sig['fixed_score2']}</b>",
     ]
     if sig.get("fixed_quarters"):
@@ -234,10 +234,10 @@ def render_info(sig: dict) -> str:
     league = html.escape(fmt_league(sig["league"]))
     lines = [
         "🏀 <b>PRIME • ПЕРЕРЫВ</b>",
-        f"🏆 {league}",
+        f"🏆 <b>{league}</b>",
         fmt_teams(sig["team1"], sig["team2"]),
         "",
-        "⏸️ Перерыв",
+        "⏸️ <b>Перерыв</b>",
         f"📊 <b>Счёт {sig['fixed_score1']}:{sig['fixed_score2']}</b>",
     ]
     if sig.get("fixed_quarters"):
