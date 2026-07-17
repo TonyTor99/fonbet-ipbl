@@ -14,7 +14,7 @@ from datetime import datetime, time as dtime, timezone, timedelta
 
 import database
 import tg_notify
-from config import (STRATEGIES, KF_MIN, KF_MAX, THRESHOLD, STAKE)
+from config import (STRATEGIES, KF_MIN, KF_MAX, STAKE)
 
 log = logging.getLogger("signals")
 
@@ -323,7 +323,8 @@ def _process_signal_tm(st: dict, state: dict):
     line = chosen["line"] if chosen else None
     odds = chosen["odds"] if chosen else None
     formula = (2 * state["half_total"] - line) if line is not None else None
-    qualified = 1 if (formula is not None and formula <= THRESHOLD) else 0
+    threshold = database.get_threshold("signal_tm")   # запас задаётся кнопкой бота
+    qualified = 1 if (formula is not None and formula <= threshold) else 0
     active = in_schedule("signal_tm")   # стратегия в окне работы?
 
     sig = _base_sig("signal_tm", st, state)

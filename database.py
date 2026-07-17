@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from config import BANKROLL_START, STAKE
+from config import BANKROLL_START, STAKE, THRESHOLD
 
 DB_PATH = os.getenv("IPBL_DB_PATH", str(Path(__file__).parent / "ipbl.db"))
 
@@ -66,6 +66,7 @@ def init_db():
             strategy   TEXT PRIMARY KEY,
             chat_id    INTEGER,
             windows    TEXT,                        -- "10:00-12:00,16:00-18:00" или NULL = круглосуточно
+            threshold  REAL,                        -- порог формулы (NULL = дефолт из config.THRESHOLD)
             updated_at TEXT
         );
     """)
@@ -82,6 +83,7 @@ def init_db():
         ("q4", "ALTER TABLE signals ADD COLUMN q4 TEXT"),
         ("line_prematch", "ALTER TABLE signals ADD COLUMN line_prematch REAL"),
         ("windows", "ALTER TABLE bot_config ADD COLUMN windows TEXT"),
+        ("threshold", "ALTER TABLE bot_config ADD COLUMN threshold REAL"),
     ]:
         try:
             conn.execute(ddl)
@@ -139,6 +141,27 @@ def set_windows(strategy: str, windows: str | None):
     conn.execute(
         "UPDATE bot_config SET windows=?, updated_at=? WHERE strategy=?",
         (windows, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), strategy),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_threshold(strategy: str = "signal_tm") -> float:
+    """Порог формулы (2*сумма-линия <= порог). NULL в БД -> дефолт config.THRESHOLD."""
+    conn = _conn()
+    row = conn.execute("SELECT threshold FROM bot_config WHERE strategy=?", (strategy,)).fetchone()
+    conn.close()
+    if not row or row["threshold"] is None:
+        return float(THRESHOLD)
+    return float(row["threshold"])
+
+
+def set_threshold(strategy: str, value: float):
+    conn = _conn()
+    _ensure_config_row(conn, strategy)
+    conn.execute(
+        "UPDATE bot_config SET threshold=?, updated_at=? WHERE strategy=?",
+        (float(value), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), strategy),
     )
     conn.commit()
     conn.close()

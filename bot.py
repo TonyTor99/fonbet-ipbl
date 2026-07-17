@@ -54,6 +54,12 @@ def money(v: float) -> str:
     return f"{v:+,.0f}".replace(",", " ") + "₽"
 
 
+def thr_label() -> str:
+    """Текущий запас для кнопки — со знаком, как в config (например -16)."""
+    v = database.get_threshold("signal_tm")
+    return str(int(v)) if v == int(v) else f"{v:.1f}".replace(".", ",")
+
+
 def _norm_hhmm(s: str) -> str:
     h, m = s.split(":")
     return f"{int(h):02d}:{int(m):02d}"
@@ -90,6 +96,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [toggle],
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
+        [InlineKeyboardButton(f"🎚 Запас сигнала: {thr_label()}", callback_data="setthr")],
         [InlineKeyboardButton("📦 Сборщик Prime", callback_data="collector")],
         [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
         [InlineKeyboardButton("⏰ Время работы", callback_data="sched")],
@@ -339,6 +346,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"или <code>off</code> — круглосуточно.\nОтмена — /start",
             parse_mode="HTML")
 
+    elif data == "setthr":
+        ctx.user_data["await"] = ("thr", "signal_tm")
+        await q.edit_message_text(
+            f"🎚 <b>Запас сигнала</b>\n"
+            f"Сейчас: <b>{thr_label()}</b>  "
+            f"(сигнал при 2×сумма − линия ≤ {thr_label()})\n\n"
+            f"Пришли новое значение со знаком, например <code>-16</code> или <code>-18</code>.\n"
+            f"Отмена — /start", parse_mode="HTML")
+
     elif data == "reset_ask":
         await q.edit_message_text("⚠️ <b>Удалить все сигналы из БД?</b>\nОтменить нельзя.",
                                   parse_mode="HTML", reply_markup=confirm_reset_kb())
@@ -372,6 +388,18 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("await", None)
         await update.message.reply_text(
             f"✅ {STRATEGIES.get(code, code)} → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=main_kb())
+
+    elif kind == "thr":
+        try:
+            num = float(raw.replace(",", "."))
+        except ValueError:
+            await update.message.reply_text("❌ Нужно число со знаком, например -16 или -18. Ещё раз или /start.")
+            return
+        database.set_threshold(code, num)   # сохраняем ровно как введено (со знаком)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Запас сигнала → <b>{thr_label()}</b>.\nНовые матчи считаются по нему.",
             parse_mode="HTML", reply_markup=main_kb())
 
     elif kind == "sched":

@@ -15,6 +15,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 import database
+from config import STAKE
 
 STRATEGY = "signal_tm"
 
@@ -40,7 +41,7 @@ COLUMNS = [
     ("Итог счёт", "final_score"),
     ("Итог тотал", "final_total"),
     ("Результат", "result"),
-    ("Прибыль ₽", "profit"),
+    ("Прибыль ₽", "__profit"),
     ("Блок ТМ (перерыв)", "totals_snapshot"),
 ]
 
@@ -53,6 +54,25 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 CENTER = {"__qualified", "__sent", "__in_window"}
 
 
+def _profit(row: dict):
+    """Прибыль по ставке ТМ для ЛЮБОГО матча (не только прошедшего формулу).
+    Хранимую прибыль (по прошедшим формулу) берём как есть, для остальных
+    считаем гипотетическую из результата и кф — чтобы видеть её в Excel."""
+    p = row.get("profit")
+    if p is not None:
+        return p
+    line = row.get("line")
+    result = row.get("result")
+    odds = row.get("odds")
+    if line is None or not result:      # void или матч ещё без итога
+        return None
+    if result == "Выигрыш":
+        return STAKE * (odds - 1) if odds else None
+    if result == "Проигрыш":
+        return -STAKE
+    return None
+
+
 def _value(row: dict, key: str):
     if key == "__qualified":
         return "Да" if row.get("qualified") else "Нет"
@@ -62,6 +82,8 @@ def _value(row: dict, key: str):
         return "Да" if row.get("in_window") else "Нет"
     if key == "__half_score":
         return f"{row.get('fixed_score1')}:{row.get('fixed_score2')}"
+    if key == "__profit":
+        return _profit(row)
     return row.get(key)
 
 
