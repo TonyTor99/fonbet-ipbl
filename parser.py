@@ -229,7 +229,8 @@ def run_cycle() -> list[dict]:
         totals = extract_totals(api_map.get(eid), eid)
 
         state = {
-            "event_id": eid, "league": meta["league"], "division": division,
+            "event_id": eid, "sport_id": meta["sportId"],
+            "league": meta["league"], "division": division,
             "team1": meta["team1"] or "?", "team2": meta["team2"] or "?",
             "score1": s1, "score2": s2, "ts": ts, "comment": comment,
             "quarters": quarters, "totals": totals,

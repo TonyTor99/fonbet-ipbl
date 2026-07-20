@@ -69,6 +69,12 @@ def init_db():
             threshold  REAL,                        -- порог формулы (NULL = дефолт из config.THRESHOLD)
             updated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS league_config (
+            sport_id   INTEGER PRIMARY KEY,         -- sportId лиги из config.LEAGUES
+            enabled    INTEGER NOT NULL DEFAULT 1,  -- 1 = сигналы шлём, 0 = лига выключена
+            updated_at TEXT
+        );
     """)
     conn.commit()
     # миграции для уже существующей БД
@@ -165,6 +171,40 @@ def set_threshold(strategy: str, value: float):
     )
     conn.commit()
     conn.close()
+
+
+# --- вкл/выкл лиг ----------------------------------------------------------
+# По умолчанию (строки в league_config нет) лига ВКЛЮЧЕНА. Выключенная лига
+# не даёт сигналов. Читается парсером каждый цикл из общей WAL-базы —
+# изменение из бота подхватывается сразу, без рестарта.
+
+def league_enabled(sport_id: int) -> bool:
+    if sport_id is None:
+        return True
+    conn = _conn()
+    row = conn.execute("SELECT enabled FROM league_config WHERE sport_id=?", (sport_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return True
+    return bool(row["enabled"])
+
+
+def set_league_enabled(sport_id: int, enabled: bool):
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO league_config (sport_id, enabled, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(sport_id) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at",
+        (sport_id, 1 if enabled else 0, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def toggle_league(sport_id: int) -> bool:
+    """Переключает статус лиги, возвращает новое состояние (True=включена)."""
+    new_state = not league_enabled(sport_id)
+    set_league_enabled(sport_id, new_state)
+    return new_state
 
 
 # --- сигналы ---------------------------------------------------------------

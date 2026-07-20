@@ -388,6 +388,10 @@ def process_match(state: dict):
     if not state.get("at_break"):
         return
 
+    # лига выключена кнопкой бота — сигналы по ней не шлём и в БД не пишем
+    if not database.league_enabled(state.get("sport_id")):
+        return
+
     try:
         _process_signal_tm(st, state)
     except Exception as e:

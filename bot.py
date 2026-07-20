@@ -18,7 +18,7 @@ import signals
 import collector_db
 import export_prime
 import export_signals
-from config import BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS
+from config import BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -97,6 +97,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
         [InlineKeyboardButton(f"🎚 Запас сигнала: {thr_label()}", callback_data="setthr")],
+        [InlineKeyboardButton("🏀 Лиги (вкл/выкл)", callback_data="leagues")],
         [InlineKeyboardButton("📦 Сборщик Prime", callback_data="collector")],
         [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
         [InlineKeyboardButton("⏰ Время работы", callback_data="sched")],
@@ -140,6 +141,22 @@ def collector_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔄 Обновить", callback_data="collector")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
+
+
+def league_short(name: str) -> str:
+    """'Россия. IPBL. Женщины. Pro Division' -> 'Женщины. Pro Division'."""
+    return name.replace("Россия.", "").replace("IPBL.", "").strip(" .")
+
+
+def leagues_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for sid, (name, _div) in LEAGUES.items():
+        en = database.league_enabled(sid)
+        mark = "✅" if en else "🚫"
+        rows.append([InlineKeyboardButton(f"{mark} {league_short(name)}",
+                                          callback_data=f"togglelg:{sid}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
+    return InlineKeyboardMarkup(rows)
 
 
 def confirm_reset_kb() -> InlineKeyboardMarkup:
@@ -216,6 +233,18 @@ def sched_text() -> str:
     for code, name in STRATEGIES.items():
         lines.append(f"• <b>{name}</b>")
         lines.append(f"   {signals.fmt_windows(code)}  ·  {signals.window_status(code)}")
+    return "\n".join(lines)
+
+
+def leagues_text() -> str:
+    lines = [
+        "🏀 <b>Лиги</b>",
+        "Тап по лиге переключает её. Выключенная лига (🚫) не даёт сигналов.",
+        "",
+    ]
+    for sid, (name, _div) in LEAGUES.items():
+        en = database.league_enabled(sid)
+        lines.append(f"{'✅ включена' if en else '🚫 выключена'} — <b>{league_short(name)}</b>")
     return "\n".join(lines)
 
 
@@ -328,6 +357,17 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "sched":
         ctx.user_data.pop("await", None)
         await q.edit_message_text(sched_text(), parse_mode="HTML", reply_markup=sched_kb())
+
+    elif data == "leagues":
+        await q.edit_message_text(leagues_text(), parse_mode="HTML", reply_markup=leagues_kb())
+
+    elif data.startswith("togglelg:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        database.toggle_league(sid)
+        await q.edit_message_text(leagues_text(), parse_mode="HTML", reply_markup=leagues_kb())
 
     elif data.startswith("setchat:"):
         code = data.split(":", 1)[1]
