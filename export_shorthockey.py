@@ -71,7 +71,7 @@ def _value(row: dict, key: str):
     if key == "__prematch":
         return "да" if row.get("is_prematch") else None
     if key == "__minute":
-        return None if row.get("is_prematch") else row.get("game_minute")
+        return "Не начался" if row.get("is_prematch") else row.get("game_minute")
     if key == "__date":
         return (row.get("snap_dt_msk") or "").split(" ")[0] or None
     if key == "__time":
