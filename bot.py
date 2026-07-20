@@ -18,12 +18,16 @@ import signals
 import collector_db
 import export_prime
 import export_signals
+import sh_collector_db
+import export_shorthockey
 from config import BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
+SH_LOG_FILE = DIR / "sh_parser.log"
 MSK = timezone(timedelta(hours=3))
 _proc: subprocess.Popen | None = None
+_sh_proc: subprocess.Popen | None = None
 
 
 # --- helpers ---------------------------------------------------------------
@@ -32,7 +36,8 @@ def parser_running() -> bool:
     if _proc is not None and _proc.poll() is None:
         return True
     try:
-        r = subprocess.run(["pgrep", "-f", "parser.py"], capture_output=True, timeout=2)
+        # "/parser.py" — не матчит sh_parser.py (там "_parser.py")
+        r = subprocess.run(["pgrep", "-f", "/parser.py"], capture_output=True, timeout=2)
         return r.returncode == 0
     except Exception:
         return False
@@ -47,7 +52,29 @@ def stop_parser():
         except subprocess.TimeoutExpired:
             _proc.kill()
         _proc = None
-    subprocess.run(["pkill", "-f", "parser.py"], capture_output=True)
+    subprocess.run(["pkill", "-f", "/parser.py"], capture_output=True)
+
+
+def sh_parser_running() -> bool:
+    if _sh_proc is not None and _sh_proc.poll() is None:
+        return True
+    try:
+        r = subprocess.run(["pgrep", "-f", "sh_parser.py"], capture_output=True, timeout=2)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def stop_sh_parser():
+    global _sh_proc
+    if _sh_proc and _sh_proc.poll() is None:
+        _sh_proc.terminate()
+        try:
+            _sh_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _sh_proc.kill()
+        _sh_proc = None
+    subprocess.run(["pkill", "-f", "sh_parser.py"], capture_output=True)
 
 
 def money(v: float) -> str:
@@ -99,9 +126,10 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"🎚 Запас сигнала: {thr_label()}", callback_data="setthr")],
         [InlineKeyboardButton("🏀 Лиги (вкл/выкл)", callback_data="leagues")],
         [InlineKeyboardButton("📦 Сборщик Prime", callback_data="collector")],
+        [InlineKeyboardButton("🏒 Сборщик шорт-хоккей", callback_data="sh_collector")],
         [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
         [InlineKeyboardButton("⏰ Время работы", callback_data="sched")],
-        [InlineKeyboardButton("🗑 Сбросить БД", callback_data="reset_ask")],
+        [InlineKeyboardButton("🗑 Сбросить БД стратегий", callback_data="reset_ask")],
     ])
 
 
@@ -139,8 +167,36 @@ def collector_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="export")],
         [InlineKeyboardButton("🔄 Обновить", callback_data="collector")],
+        [InlineKeyboardButton("🗑 Сбросить БД Prime", callback_data="pr_reset_ask")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
+
+
+def confirm_pr_reset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="pr_reset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="collector"),
+    ]])
+
+
+def sh_collector_kb() -> InlineKeyboardMarkup:
+    toggle = (InlineKeyboardButton("⏹ Остановить сборщик", callback_data="sh_stop")
+              if sh_parser_running() else
+              InlineKeyboardButton("▶️ Запустить сборщик", callback_data="sh_start"))
+    return InlineKeyboardMarkup([
+        [toggle],
+        [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="sh_export")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data="sh_collector")],
+        [InlineKeyboardButton("🗑 Сбросить БД хоккея", callback_data="sh_reset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def confirm_sh_reset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="sh_reset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="sh_collector"),
+    ]])
 
 
 def league_short(name: str) -> str:
@@ -215,6 +271,29 @@ def collector_text() -> str:
     return "\n".join(lines)
 
 
+def sh_collector_text() -> str:
+    st = sh_collector_db.stats()
+    lines = [
+        "🏒 <b>Сборщик рынков шорт-хоккея</b>",
+        f"Сборщик: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}",
+        "Лиги: все «Шорт-хоккей…» (авто-подхват)",
+        "",
+        f"Матчей собрано: <b>{st['events']}</b>",
+        f"Строк (снимков): <b>{st['rows']}</b>",
+        f"С результатом: <b>{st['resolved']}</b>",
+        "",
+    ]
+    summ = sh_collector_db.events_summary(15)
+    if summ:
+        lines.append("Последние матчи:")
+        for e in summ:
+            fin = e["final_score"] if e["final_score"] else "идёт"
+            lines.append(f"• {e['team1']} — {e['team2']}: {e['minutes']} стр · {fin}")
+    else:
+        lines.append("Пока пусто — ждём live-матч шорт-хоккея.")
+    return "\n".join(lines)
+
+
 def chats_text() -> str:
     lines = ["⚙️ <b>Чаты стратегий</b>", "Нажми на стратегию и пришли chat_id одним сообщением.", ""]
     for code, name in STRATEGIES.items():
@@ -263,7 +342,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    global _proc
+    global _proc, _sh_proc
     q = update.callback_query
     if not _authorized(update):
         await q.answer("⛔ Нет доступа", show_alert=True)
@@ -350,6 +429,57 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(q.message.chat_id, collector_text(),
                                    parse_mode="HTML", reply_markup=collector_kb())
 
+    elif data == "sh_collector":
+        await q.edit_message_text(sh_collector_text(), parse_mode="HTML",
+                                  reply_markup=sh_collector_kb())
+
+    elif data == "sh_start":
+        if not sh_parser_running():
+            f = open(SH_LOG_FILE, "a")
+            _sh_proc = subprocess.Popen([sys.executable, "-u", str(DIR / "sh_parser.py")],
+                                        cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
+        await q.edit_message_text("✅ Сборщик шорт-хоккея запущен.\n\n" + sh_collector_text(),
+                                  parse_mode="HTML", reply_markup=sh_collector_kb())
+
+    elif data == "sh_stop":
+        stop_sh_parser()
+        await q.edit_message_text("⏹ Сборщик шорт-хоккея остановлен.\n\n" + sh_collector_text(),
+                                  parse_mode="HTML", reply_markup=sh_collector_kb())
+
+    elif data == "sh_export":
+        st = sh_collector_db.stats()
+        if st["rows"] == 0:
+            await q.edit_message_text("🏒 Сборщик пока пуст — нечего выгружать.",
+                                      parse_mode="HTML", reply_markup=sh_collector_kb())
+            return
+        await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"shorthockey_markets_{ts}.xlsx"
+        try:
+            export_shorthockey.build(str(path))
+            with open(path, "rb") as fp:
+                await ctx.bot.send_document(
+                    chat_id=q.message.chat_id, document=fp, filename=path.name,
+                    caption=f"🏒 Рынки шорт-хоккей · матчей {st['events']} · строк {st['rows']}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, sh_collector_text(),
+                                   parse_mode="HTML", reply_markup=sh_collector_kb())
+
+    elif data == "sh_reset_ask":
+        await q.edit_message_text("⚠️ <b>Удалить все снимки шорт-хоккея из БД?</b>\nОтменить нельзя.",
+                                  parse_mode="HTML", reply_markup=confirm_sh_reset_kb())
+
+    elif data == "sh_reset_yes":
+        sh_collector_db.clear_db()
+        await q.edit_message_text("✅ БД шорт-хоккея очищена.\n\n" + sh_collector_text(),
+                                  parse_mode="HTML", reply_markup=sh_collector_kb())
+
     elif data == "chats":
         ctx.user_data.pop("await", None)
         await q.edit_message_text(chats_text(), parse_mode="HTML", reply_markup=chats_kb())
@@ -396,13 +526,24 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Отмена — /start", parse_mode="HTML")
 
     elif data == "reset_ask":
-        await q.edit_message_text("⚠️ <b>Удалить все сигналы из БД?</b>\nОтменить нельзя.",
-                                  parse_mode="HTML", reply_markup=confirm_reset_kb())
+        await q.edit_message_text(
+            "⚠️ <b>Удалить все сигналы из БД стратегий?</b>\n"
+            "Сборщики Prime и шорт-хоккея не затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_reset_kb())
 
     elif data == "reset_yes":
         database.clear_db()
-        await q.edit_message_text("✅ БД очищена.\n\n" + panel_text(),
+        await q.edit_message_text("✅ БД стратегий очищена.\n\n" + panel_text(),
                                   parse_mode="HTML", reply_markup=main_kb())
+
+    elif data == "pr_reset_ask":
+        await q.edit_message_text("⚠️ <b>Удалить все снимки сборщика Prime из БД?</b>\nОтменить нельзя.",
+                                  parse_mode="HTML", reply_markup=confirm_pr_reset_kb())
+
+    elif data == "pr_reset_yes":
+        collector_db.clear_db()
+        await q.edit_message_text("✅ БД сборщика Prime очищена.\n\n" + collector_text(),
+                                  parse_mode="HTML", reply_markup=collector_kb())
 
     elif data == "back":
         ctx.user_data.pop("await", None)
@@ -470,6 +611,7 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 
 def main():
     database.init_db()
+    sh_collector_db.init_db()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
     app = Application.builder().token(BOT_TOKEN).request(request).build()
