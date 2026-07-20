@@ -25,6 +25,7 @@ COLUMNS = [
     ("Прошёл формулу", "__qualified"),
     ("Отправлен в ТГ", "__sent"),
     ("В окне работы", "__in_window"),
+    ("Лига выключена", "__muted"),
     ("Лига", "league"),
     ("Команда 1", "team1"),
     ("Команда 2", "team2"),
@@ -51,7 +52,7 @@ WIN_FILL = PatternFill("solid", fgColor="C6EFCE")    # зелёный
 LOSE_FILL = PatternFill("solid", fgColor="FFC7CE")   # красный
 THIN = Side(style="thin", color="D9D9D9")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-CENTER = {"__qualified", "__sent", "__in_window"}
+CENTER = {"__qualified", "__sent", "__in_window", "__muted"}
 
 
 def _profit(row: dict):
@@ -80,6 +81,8 @@ def _value(row: dict, key: str):
         return "Да" if row.get("status") == "sent" else "Нет"
     if key == "__in_window":
         return "Да" if row.get("in_window") else "Нет"
+    if key == "__muted":
+        return "Да" if row.get("muted") else "Нет"
     if key == "__half_score":
         return f"{row.get('fixed_score1')}:{row.get('fixed_score2')}"
     if key == "__profit":

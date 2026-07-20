@@ -270,6 +270,7 @@ def _base_sig(strategy: str, st: dict, state: dict) -> dict:
         "formula_value": None,
         "qualified": 0,
         "in_window": 1,
+        "muted": 0,
         "totals_snapshot": fmt_totals_snapshot(state["totals"]),
         "fixed_score1": state["score1"],
         "fixed_score2": state["score2"],
@@ -291,27 +292,32 @@ def _base_sig(strategy: str, st: dict, state: dict) -> dict:
     }
 
 
-def _store_and_send(sig: dict, render_fn):
+def _store_and_send(sig: dict, render_fn, muted: bool = False):
+    """Пишет сигнал в БД. Если muted (лига выключена кнопкой) — строка сохраняется
+    как обычно, но в Telegram НЕ уходит (status='muted', в статистику не идёт)."""
     chat_id = database.get_chat_id(sig["strategy"])
     sig["chat_id"] = chat_id
-    if chat_id is not None:
+    if muted:
+        sig["status"] = "muted"        # лига выключена — фиксируем, но не шлём
+    elif chat_id is not None:
         sig["status"] = "sent" if sig["strategy"] != "prime_info" else "info"
         sig["message_id"] = tg_notify.send(chat_id, render_fn(sig))
     sid = database.insert_signal(sig)
     if sid is None:
         log.info("dup skipped %s ev=%s", sig["strategy"], sig["event_id"])
     else:
-        log.info("SIGNAL %s ev=%s line=%s odds=%s score=%s:%s chat=%s",
+        log.info("SIGNAL %s ev=%s line=%s odds=%s score=%s:%s chat=%s muted=%s",
                  sig["strategy"], sig["event_id"], sig["line"], sig["odds"],
-                 sig["fixed_score1"], sig["fixed_score2"], chat_id)
+                 sig["fixed_score1"], sig["fixed_score2"], chat_id, muted)
     return sid
 
 
 # --- стратегии -------------------------------------------------------------
 
-def _process_signal_tm(st: dict, state: dict):
+def _process_signal_tm(st: dict, state: dict, muted: bool = False):
     """На перерыве пишем строку для КАЖДОГО матча (с тоталами), независимо от условия.
-    В Telegram уходит только прошедший формулу (qualified) и только в окне работы."""
+    В Telegram уходит только прошедший формулу (qualified) и только в окне работы.
+    muted=True (лига выключена) — строку пишем как обычно, но в TG не шлём."""
     if st["tm_done"] or database.signal_exists("signal_tm", state["event_id"]):
         st["tm_done"] = True
         return
@@ -334,19 +340,20 @@ def _process_signal_tm(st: dict, state: dict):
     sig["line_move"] = fmt_line_move(st["line_hist"], line)
     sig["qualified"] = qualified
     sig["in_window"] = 1 if active else 0   # пауза → в статистику не идёт
+    sig["muted"] = 1 if muted else 0        # лига выключена → пишем, но не шлём и не в статистику
 
-    # отправляем в TG только прошедший формулу, в окне работы, при заданном чате
+    # отправляем в TG только прошедший формулу, в окне работы, при включённой лиге
     if qualified and active:
-        _store_and_send(sig, render_signal)
+        _store_and_send(sig, render_signal, muted)
     else:
         sig["status"] = "skipped"   # снимок перерыва без отправки (анализ)
         database.insert_signal(sig)
-        log.info("snapshot signal_tm ev=%s line=%s formula=%s qualified=%s in_window=%s",
-                 state["event_id"], line, formula, qualified, sig["in_window"])
+        log.info("snapshot signal_tm ev=%s line=%s formula=%s qualified=%s in_window=%s muted=%s",
+                 state["event_id"], line, formula, qualified, sig["in_window"], sig["muted"])
     st["tm_done"] = True
 
 
-def _process_prime_info(st: dict, state: dict):
+def _process_prime_info(st: dict, state: dict, muted: bool = False):
     # только МУЖСКАЯ Prime (женская — в названии "Женщины" — не нужна)
     if state["division"] != "prime" or "Женщин" in state["league"]:
         return
@@ -364,7 +371,8 @@ def _process_prime_info(st: dict, state: dict):
         sig["formula_value"] = 2 * state["half_total"] - line
     # движение линии ставки за матч
     sig["line_move"] = fmt_line_move(st["line_hist"], line)
-    _store_and_send(sig, render_info)
+    sig["muted"] = 1 if muted else 0
+    _store_and_send(sig, render_info, muted)
     st["info_done"] = True
 
 
@@ -388,16 +396,16 @@ def process_match(state: dict):
     if not state.get("at_break"):
         return
 
-    # лига выключена кнопкой бота — сигналы по ней не шлём и в БД не пишем
-    if not database.league_enabled(state.get("sport_id")):
-        return
+    # лига выключена кнопкой бота — строку в БД пишем как обычно (для истории и
+    # дорасчёта прибыли), но сигнал в Telegram не шлём и в статистику не берём.
+    muted = not database.league_enabled(state.get("sport_id"))
 
     try:
-        _process_signal_tm(st, state)
+        _process_signal_tm(st, state, muted)
     except Exception as e:
         log.warning("signal_tm err ev=%s: %s", eid, e)
     try:
-        _process_prime_info(st, state)
+        _process_prime_info(st, state, muted)
     except Exception as e:
         log.warning("prime_info err ev=%s: %s", eid, e)
 

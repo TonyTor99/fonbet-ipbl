@@ -40,6 +40,7 @@ def init_db():
             formula_value REAL,                   -- 2*half_total - line
             qualified     INTEGER NOT NULL DEFAULT 0,  -- 1 = прошёл формулу (сигнал), 0 = просто снимок перерыва
             in_window     INTEGER NOT NULL DEFAULT 1,  -- 1 = в окне работы (идёт в статистику), 0 = пауза (только анализ)
+            muted         INTEGER NOT NULL DEFAULT 0,  -- 1 = лига выключена кнопкой: строку пишем как обычно, но в TG не шлём и в статистику не берём
             totals_snapshot TEXT,                 -- весь блок ТМ на перерыве "219.5@2.1|220.5@1.87|..."
             fixed_score1  INTEGER NOT NULL,
             fixed_score2  INTEGER NOT NULL,
@@ -72,7 +73,7 @@ def init_db():
 
         CREATE TABLE IF NOT EXISTS league_config (
             sport_id   INTEGER PRIMARY KEY,         -- sportId лиги из config.LEAGUES
-            enabled    INTEGER NOT NULL DEFAULT 1,  -- 1 = сигналы шлём, 0 = лига выключена
+            enabled    INTEGER NOT NULL DEFAULT 1,  -- 1 = шлём в TG, 0 = выключена (пишем в БД, но в TG не шлём и в статистику не берём)
             updated_at TEXT
         );
     """)
@@ -81,6 +82,7 @@ def init_db():
     for col, ddl in [
         ("qualified", "ALTER TABLE signals ADD COLUMN qualified INTEGER NOT NULL DEFAULT 0"),
         ("in_window", "ALTER TABLE signals ADD COLUMN in_window INTEGER NOT NULL DEFAULT 1"),
+        ("muted", "ALTER TABLE signals ADD COLUMN muted INTEGER NOT NULL DEFAULT 0"),
         ("totals_snapshot", "ALTER TABLE signals ADD COLUMN totals_snapshot TEXT"),
         ("line_move", "ALTER TABLE signals ADD COLUMN line_move TEXT"),
         ("q1", "ALTER TABLE signals ADD COLUMN q1 TEXT"),
@@ -175,8 +177,10 @@ def set_threshold(strategy: str, value: float):
 
 # --- вкл/выкл лиг ----------------------------------------------------------
 # По умолчанию (строки в league_config нет) лига ВКЛЮЧЕНА. Выключенная лига
-# не даёт сигналов. Читается парсером каждый цикл из общей WAL-базы —
-# изменение из бота подхватывается сразу, без рестарта.
+# пишется в БД как обычно (снимок, дорасчёт, прибыль), но сигнал в TG не
+# отправляется и в статистику стратегии не идёт (столбец signals.muted=1).
+# Читается парсером каждый цикл из общей WAL-базы — изменение из бота
+# подхватывается сразу, без рестарта.
 
 def league_enabled(sport_id: int) -> bool:
     if sport_id is None:
@@ -225,13 +229,13 @@ def insert_signal(sig: dict) -> int | None:
         cur = conn.execute("""
             INSERT INTO signals
                 (strategy, event_id, league, division, team1, team2, side, line, odds,
-                 half_total, formula_value, qualified, in_window, totals_snapshot,
+                 half_total, formula_value, qualified, in_window, muted, totals_snapshot,
                  fixed_score1, fixed_score2, fixed_quarters, q1, q2, q3, q4,
                  line_move, line_prematch,
                  chat_id, message_id, status, result, final_score, final_total, profit, created_at)
             VALUES
                 (:strategy, :event_id, :league, :division, :team1, :team2, :side, :line, :odds,
-                 :half_total, :formula_value, :qualified, :in_window, :totals_snapshot,
+                 :half_total, :formula_value, :qualified, :in_window, :muted, :totals_snapshot,
                  :fixed_score1, :fixed_score2, :fixed_quarters, :q1, :q2, :q3, :q4,
                  :line_move, :line_prematch,
                  :chat_id, :message_id, :status, :result, :final_score, :final_total, :profit, :created_at)
@@ -275,11 +279,13 @@ def update_signal_result(signal_id: int, result: str | None,
 
 
 def bot_stats(strategy: str) -> dict:
-    """Статистика стратегии. Считаются ТОЛЬКО матчи в окне работы (in_window=1);
-    перерывы во время паузы в статистику не идут. `matches` = снимки перерыва (в окне),
-    `signals` = прошедшие формулу. Win/loss/прибыль — по прошедшим (qualified=1)."""
+    """Статистика стратегии. Считаются ТОЛЬКО реально отправленные сигналы: в окне
+    работы (in_window=1) и не заглушённые выключенной лигой (muted=0); перерывы во
+    время паузы и матчи выключенных лиг в статистику не идут. `matches` = снимки
+    перерыва (в окне), `signals` = прошедшие формулу. Win/loss/прибыль — по прошедшим
+    (qualified=1)."""
     conn = _conn()
-    q = "SELECT COUNT(*) FROM signals WHERE strategy=? AND in_window=1"
+    q = "SELECT COUNT(*) FROM signals WHERE strategy=? AND in_window=1 AND muted=0"
     qq = q + " AND qualified=1"
     total   = conn.execute(q, (strategy,)).fetchone()[0]
     signals = conn.execute(qq, (strategy,)).fetchone()[0]
@@ -288,7 +294,7 @@ def bot_stats(strategy: str) -> dict:
     no_res  = conn.execute(qq + " AND result IS NULL", (strategy,)).fetchone()[0]
     void    = conn.execute(qq + " AND line IS NULL", (strategy,)).fetchone()[0]
     profit  = conn.execute(
-        "SELECT COALESCE(SUM(profit),0) FROM signals WHERE strategy=? AND qualified=1 AND in_window=1",
+        "SELECT COALESCE(SUM(profit),0) FROM signals WHERE strategy=? AND qualified=1 AND in_window=1 AND muted=0",
         (strategy,)).fetchone()[0]
     conn.close()
     settled = wins + losses
