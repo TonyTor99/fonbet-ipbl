@@ -25,7 +25,7 @@ import collector
 import collector_db
 from config import (LINE_SERVERS, HEADERS, SCOPE_MARKET, POLL_INTERVAL, MAX_WORKERS,
                     LEAGUES, HALFTIME_TS, HALFTIME_TOL_AFTER, MATCH_TOTAL_FIDS,
-                    COLLECTOR_LEAGUE)
+                    COLLECTOR_LEAGUES)
 
 log = logging.getLogger("parser")
 MSK = timezone(timedelta(hours=3))
@@ -146,7 +146,9 @@ def _finalize(eid: int, comment: str = ""):
     quarters = parse_quarters(comment or _last_comment.get(eid, ""))
     log.info("finalize ev=%s %s (тотал %s)", eid, final_score, final_total)
     signals.resolve(eid, final_score, final_total, quarters)
-    collector.resolve(eid, s1, s2)
+    sid = (_known.get(eid) or {}).get("sportId")
+    if sid in COLLECTOR_LEAGUES:
+        collector.resolve(eid, s1, s2, COLLECTOR_LEAGUES[sid][1])
     _known.pop(eid, None)
     _last_score.pop(eid, None)
     _last_comment.pop(eid, None)
@@ -241,9 +243,9 @@ def run_cycle() -> list[dict]:
         except Exception as e:
             log.warning("process_match err ev=%s: %s", eid, e)
 
-        if meta["sportId"] == COLLECTOR_LEAGUE:
+        if meta["sportId"] in COLLECTOR_LEAGUES:
             try:
-                collector.process(state, api_map.get(eid))
+                collector.process(state, api_map.get(eid), COLLECTOR_LEAGUES[meta["sportId"]][1])
             except Exception as e:
                 log.warning("collector err ev=%s: %s", eid, e)
 
@@ -302,11 +304,13 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(name)s] %(message)s", datefmt="%H:%M:%S")
     database.init_db()
-    collector_db.init_db()
+    for _name, _db in COLLECTOR_LEAGUES.values():
+        collector_db.init_db(_db)
     if args.reset:
         database.clear_db()
-        collector_db.clear_db()
-        print("БД очищена (сигналы + сборщик).")
+        for _name, _db in COLLECTOR_LEAGUES.values():
+            collector_db.clear_db(_db)
+        print("БД очищена (сигналы + все сборщики IPBL).")
 
     print(f"Fonbet IPBL Parser | интервал={POLL_INTERVAL}с | расписание по МСК")
     print("Лиги:", ", ".join(n for n, _ in LEAGUES.values()))

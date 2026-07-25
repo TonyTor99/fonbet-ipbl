@@ -91,15 +91,17 @@ def extract_markets(factors: list[dict]) -> dict:
 
 # --- запись по игровой минуте ----------------------------------------------
 
-def process(state: dict, api_data):
-    """Пишет снимок, если игровая минута сменилась (≤1 строка в игр. минуту)."""
+def process(state: dict, api_data, db: str):
+    """Пишет снимок, если игровая минута сменилась (≤1 строка в игр. минуту).
+
+    db — файл БД лиги (у каждой лиги IPBL свой, см. config.COLLECTOR_LEAGUES)."""
     eid = state["event_id"]
     ts = state.get("ts") or 0
     minute = ts // 60
 
     if _last_minute.get(eid) == minute:
         return
-    if collector_db.snapshot_exists(eid, minute):
+    if collector_db.snapshot_exists(db, eid, minute):
         _last_minute[eid] = minute
         return
 
@@ -122,7 +124,7 @@ def process(state: dict, api_data):
         "created_at": datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S"),
         **markets,
     }
-    sid = collector_db.insert_snapshot(row)
+    sid = collector_db.insert_snapshot(db, row)
     _last_minute[eid] = minute
     if sid is not None:
         log.info("collect ev=%s min=%s score=%s:%s tot=%s fora=%s",
@@ -169,17 +171,19 @@ def _resolve_row(r: dict, s1: int, s2: int) -> dict:
     return res
 
 
-def resolve(event_id: int, s1: int, s2: int):
-    """На финале матча проставляет результат каждого исхода во всех строках матча."""
+def resolve(event_id: int, s1: int, s2: int, db: str):
+    """На финале матча проставляет результат каждого исхода во всех строках матча.
+
+    db — файл БД лиги матча (см. config.COLLECTOR_LEAGUES)."""
     final_score = f"{s1}:{s2}"
     final_total = s1 + s2
     try:
-        for r in collector_db.get_event_rows(event_id):
+        for r in collector_db.get_event_rows(db, event_id):
             if r.get("final_score") is not None:
                 continue
             res = _resolve_row(r, s1, s2)
             if res:
-                collector_db.update_results(r["id"], res, final_score, final_total)
+                collector_db.update_results(db, r["id"], res, final_score, final_total)
         log.info("collector resolve ev=%s %s (тотал %s)", event_id, final_score, final_total)
     except Exception as e:
         log.warning("collector resolve err ev=%s: %s", event_id, e)

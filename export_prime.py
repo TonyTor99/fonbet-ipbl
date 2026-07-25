@@ -77,11 +77,12 @@ def _value(row: dict, key: str):
     return row.get(key)
 
 
-def build(path: str):
-    rows = collector_db.all_rows()
+def build(path: str, db: str, title: str = "Рынки IPBL") -> int:
+    """Выгружает снимки лиги из БД `db` в Excel. Возвращает число строк."""
+    rows = collector_db.all_rows(db)
     wb = Workbook()
     ws = wb.active
-    ws.title = "Рынки Prime"
+    ws.title = title[:31]   # лимит имени листа Excel
 
     # шапка
     for c, (head, _) in enumerate(COLUMNS, 1):
@@ -108,18 +109,22 @@ def build(path: str):
         ws.column_dimensions[letter].width = max(9, min(20, len(head) + 2))
 
     wb.save(path)
-    st = collector_db.stats()
+    st = collector_db.stats(db)
     print(f"Сохранено: {path}")
     print(f"Строк: {st['rows']} | матчей: {st['events']} | с результатом: {st['resolved']}")
+    return st["rows"]
 
 
 def main():
+    from config import COLLECTOR_LEAGUES
+    # По умолчанию — Prime муж (совместимость). Можно указать: export_prime.py [файл.xlsx] [db.db]
+    db = sys.argv[2] if len(sys.argv) > 2 else "prime_markets.db"
     if len(sys.argv) > 1:
         path = sys.argv[1]
     else:
         path = f"export_prime_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    collector_db.init_db()
-    build(path)
+    collector_db.init_db(db)
+    build(path, db, "Рынки IPBL")
 
 
 if __name__ == "__main__":

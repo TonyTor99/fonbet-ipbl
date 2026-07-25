@@ -1,35 +1,39 @@
-"""Отдельная БД сборщика рынков (Prime муж).
+"""Отдельная БД сборщика рынков IPBL (по одному файлу на лигу).
 
 Одна строка = снимок матча на конкретной ИГРОВОЙ минуте.
 По каждому рынку полного матча храним КРАЙНЮЮ (верхнюю) линию: значение линии,
 кф обоих исходов и результат (В/П) каждого исхода — проставляется на финале матча.
 
-Файл БД отдельный от сигналов (config.COLLECTOR_DB), чтобы поминутный объём
-не мешал статистике сигналов и легко выгружался/чистился независимо.
+Все функции принимают путь к файлу БД (`db`), т.к. каждая лига IPBL пишет в свой
+файл (config.COLLECTOR_LEAGUES). Так поминутный объём одной лиги не мешает другим
+и легко выгружается/чистится независимо.
 """
-import os
 import sqlite3
 from pathlib import Path
 
-from config import COLLECTOR_DB
-
-DB_PATH = os.getenv("COLLECTOR_DB_PATH", str(Path(__file__).parent / COLLECTOR_DB))
+DIR = Path(__file__).parent
 
 # Исходы (для результатов и колонок Excel). side -> человекочитаемо.
 OUTCOMES = ["fora1", "fora2", "total_b", "total_m",
             "it1_b", "it1_m", "it2_b", "it2_m", "win1", "win2"]
 
 
-def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+def resolve_path(db: str) -> str:
+    """Имя файла БД -> абсолютный путь рядом с проектом (абсолютный путь не трогаем)."""
+    p = Path(db)
+    return str(p if p.is_absolute() else DIR / p)
+
+
+def _conn(db: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(resolve_path(db), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
-def init_db():
-    conn = _conn()
+def init_db(db: str):
+    conn = _conn(db)
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS market_snapshots (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,8 +80,8 @@ def init_db():
     conn.close()
 
 
-def snapshot_exists(event_id: int, game_minute: int) -> bool:
-    conn = _conn()
+def snapshot_exists(db: str, event_id: int, game_minute: int) -> bool:
+    conn = _conn(db)
     row = conn.execute(
         "SELECT 1 FROM market_snapshots WHERE event_id=? AND game_minute=?",
         (event_id, game_minute),
@@ -86,7 +90,7 @@ def snapshot_exists(event_id: int, game_minute: int) -> bool:
     return row is not None
 
 
-def insert_snapshot(row: dict) -> int | None:
+def insert_snapshot(db: str, row: dict) -> int | None:
     """UNIQUE(event_id, game_minute) защищает от дублей минуты."""
     cols = (
         "event_id, league, team1, team2, snap_dt_msk, game_minute, quarter, score1, score2, "
@@ -95,7 +99,7 @@ def insert_snapshot(row: dict) -> int | None:
         "created_at"
     )
     ph = ", ".join(":" + c.strip() for c in cols.split(","))
-    conn = _conn()
+    conn = _conn(db)
     try:
         cur = conn.execute(
             f"INSERT INTO market_snapshots ({cols}) VALUES ({ph})", row
@@ -108,8 +112,8 @@ def insert_snapshot(row: dict) -> int | None:
         conn.close()
 
 
-def get_event_rows(event_id: int) -> list[dict]:
-    conn = _conn()
+def get_event_rows(db: str, event_id: int) -> list[dict]:
+    conn = _conn(db)
     rows = conn.execute(
         "SELECT * FROM market_snapshots WHERE event_id=?", (event_id,)
     ).fetchall()
@@ -117,12 +121,12 @@ def get_event_rows(event_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def update_results(snapshot_id: int, results: dict, final_score: str, final_total: int):
+def update_results(db: str, snapshot_id: int, results: dict, final_score: str, final_total: int):
     """results: {'r_fora1': 'Выигрыш', ...}. Обновляет все результаты строки."""
     sets = ", ".join(f"{k}=:{k}" for k in results)
     params = dict(results)
     params.update(sid=snapshot_id, fs=final_score, ft=final_total)
-    conn = _conn()
+    conn = _conn(db)
     conn.execute(
         f"UPDATE market_snapshots SET {sets}, final_score=:fs, final_total=:ft WHERE id=:sid",
         params,
@@ -131,8 +135,8 @@ def update_results(snapshot_id: int, results: dict, final_score: str, final_tota
     conn.close()
 
 
-def all_rows() -> list[dict]:
-    conn = _conn()
+def all_rows(db: str) -> list[dict]:
+    conn = _conn(db)
     rows = conn.execute(
         "SELECT * FROM market_snapshots ORDER BY event_id, game_minute"
     ).fetchall()
@@ -140,9 +144,9 @@ def all_rows() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def events_summary(limit: int = 15) -> list[dict]:
+def events_summary(db: str, limit: int = 15) -> list[dict]:
     """Сводка по матчам: команды, число собранных игр. минут, итог (или None)."""
-    conn = _conn()
+    conn = _conn(db)
     rows = conn.execute(
         """SELECT event_id, team1, team2, COUNT(*) AS minutes,
                   MAX(final_score) AS final_score
@@ -156,8 +160,8 @@ def events_summary(limit: int = 15) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def stats() -> dict:
-    conn = _conn()
+def stats(db: str) -> dict:
+    conn = _conn(db)
     total = conn.execute("SELECT COUNT(*) FROM market_snapshots").fetchone()[0]
     events = conn.execute("SELECT COUNT(DISTINCT event_id) FROM market_snapshots").fetchone()[0]
     resolved = conn.execute(
@@ -167,11 +171,11 @@ def stats() -> dict:
     return {"rows": total, "events": events, "resolved": resolved}
 
 
-def clear_db():
-    conn = _conn()
+def clear_db(db: str):
+    conn = _conn(db)
     conn.execute("DELETE FROM market_snapshots")
     conn.commit()
     conn.close()
-    c2 = sqlite3.connect(DB_PATH)
+    c2 = sqlite3.connect(resolve_path(db))
     c2.execute("VACUUM")
     c2.close()

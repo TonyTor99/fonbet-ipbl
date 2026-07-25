@@ -74,6 +74,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS league_config (
             sport_id   INTEGER PRIMARY KEY,         -- sportId лиги из config.LEAGUES
             enabled    INTEGER NOT NULL DEFAULT 1,  -- 1 = шлём в TG, 0 = выключена (пишем в БД, но в TG не шлём и в статистику не берём)
+            threshold  REAL,                        -- запас формулы для ЭТОЙ лиги (NULL = дефолт config.THRESHOLD)
             updated_at TEXT
         );
     """)
@@ -92,6 +93,7 @@ def init_db():
         ("line_prematch", "ALTER TABLE signals ADD COLUMN line_prematch REAL"),
         ("windows", "ALTER TABLE bot_config ADD COLUMN windows TEXT"),
         ("threshold", "ALTER TABLE bot_config ADD COLUMN threshold REAL"),
+        ("lc_threshold", "ALTER TABLE league_config ADD COLUMN threshold REAL"),
     ]:
         try:
             conn.execute(ddl)
@@ -170,6 +172,33 @@ def set_threshold(strategy: str, value: float):
     conn.execute(
         "UPDATE bot_config SET threshold=?, updated_at=? WHERE strategy=?",
         (float(value), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), strategy),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_league_threshold(sport_id: int) -> float:
+    """Запас формулы для КОНКРЕТНОЙ лиги. Приоритет:
+    league_config.threshold (задан кнопкой на лигу) -> глобальный signal_tm -> config.THRESHOLD."""
+    if sport_id is not None:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT threshold FROM league_config WHERE sport_id=?", (sport_id,)
+        ).fetchone()
+        conn.close()
+        if row is not None and row["threshold"] is not None:
+            return float(row["threshold"])
+    return get_threshold("signal_tm")
+
+
+def set_league_threshold(sport_id: int, value: float | None):
+    """value=None -> сброс к дефолту (лига берёт глобальный/config.THRESHOLD)."""
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO league_config (sport_id, threshold, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(sport_id) DO UPDATE SET threshold=excluded.threshold, updated_at=excluded.updated_at",
+        (sport_id, None if value is None else float(value),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     )
     conn.commit()
     conn.close()

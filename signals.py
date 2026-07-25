@@ -329,7 +329,7 @@ def _process_signal_tm(st: dict, state: dict, muted: bool = False):
     line = chosen["line"] if chosen else None
     odds = chosen["odds"] if chosen else None
     formula = (2 * state["half_total"] - line) if line is not None else None
-    threshold = database.get_threshold("signal_tm")   # запас задаётся кнопкой бота
+    threshold = database.get_league_threshold(state.get("sport_id"))   # запас на каждую лигу (кнопки бота)
     qualified = 1 if (formula is not None and formula <= threshold) else 0
     active = in_schedule("signal_tm")   # стратегия в окне работы?
 

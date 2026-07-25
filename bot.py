@@ -20,7 +20,8 @@ import export_prime
 import export_signals
 import sh_collector_db
 import export_shorthockey
-from config import BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES
+from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
+                    COLLECTOR_LEAGUES)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -81,10 +82,14 @@ def money(v: float) -> str:
     return f"{v:+,.0f}".replace(",", " ") + "₽"
 
 
-def thr_label() -> str:
-    """Текущий запас для кнопки — со знаком, как в config (например -16)."""
-    v = database.get_threshold("signal_tm")
+def _fmt_thr(v: float) -> str:
+    """Запас со знаком, как в config (например -16 или -16,5)."""
     return str(int(v)) if v == int(v) else f"{v:.1f}".replace(".", ",")
+
+
+def thr_label(sport_id: int) -> str:
+    """Текущий запас конкретной лиги для кнопки."""
+    return _fmt_thr(database.get_league_threshold(sport_id))
 
 
 def _norm_hhmm(s: str) -> str:
@@ -123,13 +128,8 @@ def main_kb() -> InlineKeyboardMarkup:
         [toggle],
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
-        [InlineKeyboardButton(f"🎚 Запас сигнала: {thr_label()}", callback_data="setthr")],
-        [InlineKeyboardButton("🏀 Лиги (вкл/выкл)", callback_data="leagues")],
-        [InlineKeyboardButton("📦 Сборщик Prime", callback_data="collector")],
-        [InlineKeyboardButton("🏒 Сборщик шорт-хоккей", callback_data="sh_collector")],
-        [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
-        [InlineKeyboardButton("⏰ Время работы", callback_data="sched")],
-        [InlineKeyboardButton("🗑 Сбросить БД стратегий", callback_data="reset_ask")],
+        [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
+        [InlineKeyboardButton("🎯 Стратегия", callback_data="strat")],
     ])
 
 
@@ -137,45 +137,31 @@ def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back")]])
 
 
-def chats_kb() -> InlineKeyboardMarkup:
+# --- хаб «Сборщики»: все сборщики в одном месте ----------------------------
+
+def collectors_kb() -> InlineKeyboardMarkup:
+    """Список всех сборщиков: 4 лиги IPBL (в свои БД) + шорт-хоккей."""
     rows = []
-    for code, name in STRATEGIES.items():
-        cid = database.get_chat_id(code)
-        rows.append([InlineKeyboardButton(f"{name}: {cid if cid is not None else 'не задан'}",
-                                          callback_data=f"setchat:{code}")])
+    for sid, (name, _db) in COLLECTOR_LEAGUES.items():
+        rows.append([InlineKeyboardButton(f"🏀 IPBL · {name}", callback_data=f"col:{sid}")])
+    rows.append([InlineKeyboardButton("🏒 Шорт-хоккей", callback_data="sh_collector")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(rows)
 
 
-def sched_kb() -> InlineKeyboardMarkup:
-    rows = []
-    for code, name in STRATEGIES.items():
-        rows.append([InlineKeyboardButton(f"{name}: {signals.fmt_windows(code)}",
-                                          callback_data=f"setsched:{code}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
-    return InlineKeyboardMarkup(rows)
-
-
-def stats_kb() -> InlineKeyboardMarkup:
+def collector_kb(sport_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Выгрузить сигналы (Excel)", callback_data="export_sig")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("📥 Выгрузить Excel", callback_data=f"colx:{sport_id}")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data=f"col:{sport_id}")],
+        [InlineKeyboardButton("🗑 Сбросить БД лиги", callback_data=f"colr:{sport_id}")],
+        [InlineKeyboardButton("⬅️ К сборщикам", callback_data="collectors")],
     ])
 
 
-def collector_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="export")],
-        [InlineKeyboardButton("🔄 Обновить", callback_data="collector")],
-        [InlineKeyboardButton("🗑 Сбросить БД Prime", callback_data="pr_reset_ask")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
-    ])
-
-
-def confirm_pr_reset_kb() -> InlineKeyboardMarkup:
+def confirm_col_reset_kb(sport_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Да, удалить", callback_data="pr_reset_yes"),
-        InlineKeyboardButton("❌ Отмена", callback_data="collector"),
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"colry:{sport_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"col:{sport_id}"),
     ]])
 
 
@@ -188,7 +174,7 @@ def sh_collector_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="sh_export")],
         [InlineKeyboardButton("🔄 Обновить", callback_data="sh_collector")],
         [InlineKeyboardButton("🗑 Сбросить БД хоккея", callback_data="sh_reset_ask")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ К сборщикам", callback_data="collectors")],
     ])
 
 
@@ -197,6 +183,55 @@ def confirm_sh_reset_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton("✅ Да, удалить", callback_data="sh_reset_yes"),
         InlineKeyboardButton("❌ Отмена", callback_data="sh_collector"),
     ]])
+
+
+# --- хаб «Стратегия»: настройки сигналов в одном месте ---------------------
+
+def strategy_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎚 Запас сигнала (по лигам)", callback_data="thr")],
+        [InlineKeyboardButton("🏀 Лиги (вкл/выкл)", callback_data="leagues")],
+        [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
+        [InlineKeyboardButton("⏰ Время работы", callback_data="sched")],
+        [InlineKeyboardButton("🗑 Сбросить БД стратегий", callback_data="reset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def thr_kb() -> InlineKeyboardMarkup:
+    """Запас формулы отдельно на каждую лигу IPBL."""
+    rows = []
+    for sid, (name, _div) in LEAGUES.items():
+        rows.append([InlineKeyboardButton(f"{league_short(name)}: {thr_label(sid)}",
+                                          callback_data=f"setthr:{sid}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="strat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def chats_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for code, name in STRATEGIES.items():
+        cid = database.get_chat_id(code)
+        rows.append([InlineKeyboardButton(f"{name}: {cid if cid is not None else 'не задан'}",
+                                          callback_data=f"setchat:{code}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="strat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def sched_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for code, name in STRATEGIES.items():
+        rows.append([InlineKeyboardButton(f"{name}: {signals.fmt_windows(code)}",
+                                          callback_data=f"setsched:{code}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="strat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def stats_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Выгрузить сигналы (Excel)", callback_data="export_sig")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
 
 
 def league_short(name: str) -> str:
@@ -211,14 +246,14 @@ def leagues_kb() -> InlineKeyboardMarkup:
         mark = "✅" if en else "🚫"
         rows.append([InlineKeyboardButton(f"{mark} {league_short(name)}",
                                           callback_data=f"togglelg:{sid}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="strat")])
     return InlineKeyboardMarkup(rows)
 
 
 def confirm_reset_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Да, удалить", callback_data="reset_yes"),
-        InlineKeyboardButton("❌ Отмена", callback_data="back"),
+        InlineKeyboardButton("❌ Отмена", callback_data="strat"),
     ]])
 
 
@@ -249,25 +284,44 @@ def stats_text() -> str:
     return "\n".join(lines)
 
 
-def collector_text() -> str:
-    st = collector_db.stats()
+def collectors_text() -> str:
+    """Хаб сборщиков: сводка по всем в одном экране."""
     lines = [
-        "📦 <b>Сборщик рынков</b> (Prime муж)",
+        "📦 <b>Сборщики рынков</b>",
+        f"Парсер IPBL: {'🟢 работает' if parser_running() else '🔴 остановлен'}",
+        f"Шорт-хоккей: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}",
+        "",
+        "Лиги IPBL (сбор идёт вместе с парсером, каждая в свой файл):",
+    ]
+    for sid, (name, db) in COLLECTOR_LEAGUES.items():
+        st = collector_db.stats(db)
+        lines.append(f"• <b>{name}</b>: матчей {st['events']} · строк {st['rows']}")
+    lines.append("")
+    lines.append("Выбери сборщик для выгрузки/сброса ⤵️")
+    return "\n".join(lines)
+
+
+def collector_text(sport_id: int) -> str:
+    name, db = COLLECTOR_LEAGUES[sport_id]
+    st = collector_db.stats(db)
+    lines = [
+        f"🏀 <b>Сборщик IPBL · {name}</b>",
         f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}",
+        f"Файл: <code>{db}</code>",
         "",
         f"Матчей собрано: <b>{st['events']}</b>",
         f"Строк (игровых минут): <b>{st['rows']}</b>",
         f"С результатом: <b>{st['resolved']}</b>",
         "",
     ]
-    summ = collector_db.events_summary(15)
+    summ = collector_db.events_summary(db, 15)
     if summ:
         lines.append("Последние матчи:")
         for e in summ:
             fin = e["final_score"] if e["final_score"] else "идёт"
             lines.append(f"• {e['team1']} — {e['team2']}: {e['minutes']} мин · {fin}")
     else:
-        lines.append("Пока пусто — ждём Prime-муж матч.")
+        lines.append("Пока пусто — ждём live-матч этой лиги.")
     return "\n".join(lines)
 
 
@@ -324,6 +378,24 @@ def leagues_text() -> str:
     for sid, (name, _div) in LEAGUES.items():
         en = database.league_enabled(sid)
         lines.append(f"{'✅ включена' if en else '🚫 выключена'} — <b>{league_short(name)}</b>")
+    return "\n".join(lines)
+
+
+def strategy_text() -> str:
+    return ("🎯 <b>Стратегия ТМ</b>\n"
+            "Настройки сигналов в перерыве: запас формулы по каждой лиге, "
+            "вкл/выкл лиг, чаты, время работы, сброс БД.")
+
+
+def thr_text() -> str:
+    lines = [
+        "🎚 <b>Запас сигнала</b> (по каждой лиге)",
+        "Сигнал даётся при <code>2×сумма − линия ≤ запас</code>.",
+        "Тап по лиге — прислать новое значение со знаком (например <code>-16</code>).",
+        "",
+    ]
+    for sid, (name, _div) in LEAGUES.items():
+        lines.append(f"• <b>{league_short(name)}</b>: {thr_label(sid)}")
     return "\n".join(lines)
 
 
@@ -400,25 +472,43 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(q.message.chat_id, stats_text(),
                                    parse_mode="HTML", reply_markup=stats_kb())
 
-    elif data == "collector":
-        await q.edit_message_text(collector_text(), parse_mode="HTML",
-                                  reply_markup=collector_kb())
+    elif data == "collectors":
+        await q.edit_message_text(collectors_text(), parse_mode="HTML",
+                                  reply_markup=collectors_kb())
 
-    elif data == "export":
-        st = collector_db.stats()
+    elif data.startswith("col:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in COLLECTOR_LEAGUES:
+            return
+        await q.edit_message_text(collector_text(sid), parse_mode="HTML",
+                                  reply_markup=collector_kb(sid))
+
+    elif data.startswith("colx:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in COLLECTOR_LEAGUES:
+            return
+        name, db = COLLECTOR_LEAGUES[sid]
+        st = collector_db.stats(db)
         if st["rows"] == 0:
-            await q.edit_message_text("📦 Сборщик пока пуст — нечего выгружать.",
-                                      parse_mode="HTML", reply_markup=collector_kb())
+            await q.edit_message_text(f"📦 {name}: пока пусто — нечего выгружать.",
+                                      parse_mode="HTML", reply_markup=collector_kb(sid))
             return
         await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
         ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
-        path = DIR / f"prime_markets_{ts}.xlsx"
+        fname = Path(db).stem
+        path = DIR / f"{fname}_{ts}.xlsx"
         try:
-            export_prime.build(str(path))
+            export_prime.build(str(path), db, f"IPBL {name}")
             with open(path, "rb") as fp:
                 await ctx.bot.send_document(
                     chat_id=q.message.chat_id, document=fp, filename=path.name,
-                    caption=f"📦 Рынки Prime · матчей {st['events']} · строк {st['rows']}")
+                    caption=f"📦 Рынки IPBL · {name} · матчей {st['events']} · строк {st['rows']}")
         except Exception as e:
             await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
         finally:
@@ -426,8 +516,32 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 path.unlink()
             except Exception:
                 pass
-        await ctx.bot.send_message(q.message.chat_id, collector_text(),
-                                   parse_mode="HTML", reply_markup=collector_kb())
+        await ctx.bot.send_message(q.message.chat_id, collector_text(sid),
+                                   parse_mode="HTML", reply_markup=collector_kb(sid))
+
+    elif data.startswith("colr:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in COLLECTOR_LEAGUES:
+            return
+        name = COLLECTOR_LEAGUES[sid][0]
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить все снимки сборщика IPBL · {name}?</b>\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_col_reset_kb(sid))
+
+    elif data.startswith("colry:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in COLLECTOR_LEAGUES:
+            return
+        name, db = COLLECTOR_LEAGUES[sid]
+        collector_db.clear_db(db)
+        await q.edit_message_text(f"✅ БД сборщика IPBL · {name} очищена.\n\n" + collector_text(sid),
+                                  parse_mode="HTML", reply_markup=collector_kb(sid))
 
     elif data == "sh_collector":
         await q.edit_message_text(sh_collector_text(), parse_mode="HTML",
@@ -488,6 +602,14 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("await", None)
         await q.edit_message_text(sched_text(), parse_mode="HTML", reply_markup=sched_kb())
 
+    elif data == "strat":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(strategy_text(), parse_mode="HTML", reply_markup=strategy_kb())
+
+    elif data == "thr":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(thr_text(), parse_mode="HTML", reply_markup=thr_kb())
+
     elif data == "leagues":
         await q.edit_message_text(leagues_text(), parse_mode="HTML", reply_markup=leagues_kb())
 
@@ -516,34 +638,32 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"или <code>off</code> — круглосуточно.\nОтмена — /start",
             parse_mode="HTML")
 
-    elif data == "setthr":
-        ctx.user_data["await"] = ("thr", "signal_tm")
+    elif data.startswith("setthr:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in LEAGUES:
+            return
+        ctx.user_data["await"] = ("lthr", sid)
+        name = league_short(LEAGUES[sid][0])
         await q.edit_message_text(
-            f"🎚 <b>Запас сигнала</b>\n"
-            f"Сейчас: <b>{thr_label()}</b>  "
-            f"(сигнал при 2×сумма − линия ≤ {thr_label()})\n\n"
+            f"🎚 <b>Запас сигнала · {name}</b>\n"
+            f"Сейчас: <b>{thr_label(sid)}</b>  "
+            f"(сигнал при 2×сумма − линия ≤ {thr_label(sid)})\n\n"
             f"Пришли новое значение со знаком, например <code>-16</code> или <code>-18</code>.\n"
             f"Отмена — /start", parse_mode="HTML")
 
     elif data == "reset_ask":
         await q.edit_message_text(
             "⚠️ <b>Удалить все сигналы из БД стратегий?</b>\n"
-            "Сборщики Prime и шорт-хоккея не затрагиваются.\nОтменить нельзя.",
+            "Сборщики IPBL и шорт-хоккея не затрагиваются.\nОтменить нельзя.",
             parse_mode="HTML", reply_markup=confirm_reset_kb())
 
     elif data == "reset_yes":
         database.clear_db()
-        await q.edit_message_text("✅ БД стратегий очищена.\n\n" + panel_text(),
-                                  parse_mode="HTML", reply_markup=main_kb())
-
-    elif data == "pr_reset_ask":
-        await q.edit_message_text("⚠️ <b>Удалить все снимки сборщика Prime из БД?</b>\nОтменить нельзя.",
-                                  parse_mode="HTML", reply_markup=confirm_pr_reset_kb())
-
-    elif data == "pr_reset_yes":
-        collector_db.clear_db()
-        await q.edit_message_text("✅ БД сборщика Prime очищена.\n\n" + collector_text(),
-                                  parse_mode="HTML", reply_markup=collector_kb())
+        await q.edit_message_text("✅ БД стратегий очищена.\n\n" + strategy_text(),
+                                  parse_mode="HTML", reply_markup=strategy_kb())
 
     elif data == "back":
         ctx.user_data.pop("await", None)
@@ -571,17 +691,20 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"✅ {STRATEGIES.get(code, code)} → chat_id <code>{cid}</code>.",
             parse_mode="HTML", reply_markup=main_kb())
 
-    elif kind == "thr":
+    elif kind == "lthr":
         try:
             num = float(raw.replace(",", "."))
         except ValueError:
             await update.message.reply_text("❌ Нужно число со знаком, например -16 или -18. Ещё раз или /start.")
             return
-        database.set_threshold(code, num)   # сохраняем ровно как введено (со знаком)
+        sid = code                                   # code здесь = sportId лиги
+        database.set_league_threshold(sid, num)      # сохраняем ровно как введено (со знаком)
         ctx.user_data.pop("await", None)
+        name = league_short(LEAGUES[sid][0]) if sid in LEAGUES else str(sid)
         await update.message.reply_text(
-            f"✅ Запас сигнала → <b>{thr_label()}</b>.\nНовые матчи считаются по нему.",
-            parse_mode="HTML", reply_markup=main_kb())
+            f"✅ Запас сигнала · <b>{name}</b> → <b>{thr_label(sid)}</b>.\n"
+            f"Новые матчи этой лиги считаются по нему.",
+            parse_mode="HTML", reply_markup=thr_kb())
 
     elif kind == "sched":
         value, ok = parse_windows_input(raw)
@@ -611,6 +734,8 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 
 def main():
     database.init_db()
+    for _name, _db in COLLECTOR_LEAGUES.values():
+        collector_db.init_db(_db)
     sh_collector_db.init_db()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
