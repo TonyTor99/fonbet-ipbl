@@ -46,6 +46,17 @@ def parser_running() -> bool:
         return False
 
 
+def start_parser():
+    """Запускает основной parser.py (баскетбол) subprocess'ом, если не запущен."""
+    global _proc
+    if parser_running():
+        return
+    f = open(LOG_FILE, "a")
+    # -u: небуферизованный вывод, чтобы parser.log обновлялся в реальном времени
+    _proc = subprocess.Popen([sys.executable, "-u", str(DIR / "parser.py")],
+                             cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
+
+
 def stop_parser():
     global _proc
     if _proc and _proc.poll() is None:
@@ -66,6 +77,16 @@ def sh_parser_running() -> bool:
         return r.returncode == 0
     except Exception:
         return False
+
+
+def start_sh_parser():
+    """Запускает sh_parser.py (шорт-хоккей) subprocess'ом, если не запущен."""
+    global _sh_proc
+    if sh_parser_running():
+        return
+    f = open(SH_LOG_FILE, "a")
+    _sh_proc = subprocess.Popen([sys.executable, "-u", str(DIR / "sh_parser.py")],
+                                cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
 
 
 def stop_sh_parser():
@@ -488,11 +509,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = q.data
 
     if data == "start":
-        if not parser_running():
-            f = open(LOG_FILE, "a")
-            # -u: небуферизованный вывод, чтобы parser.log обновлялся в реальном времени
-            _proc = subprocess.Popen([sys.executable, "-u", str(DIR / "parser.py")],
-                                     cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
+        start_parser()
         await q.edit_message_text("✅ Парсер запущен.\n\n" + panel_text(),
                                   parse_mode="HTML", reply_markup=main_kb())
 
@@ -681,10 +698,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                   reply_markup=sh_collector_kb())
 
     elif data == "sh_start":
-        if not sh_parser_running():
-            f = open(SH_LOG_FILE, "a")
-            _sh_proc = subprocess.Popen([sys.executable, "-u", str(DIR / "sh_parser.py")],
-                                        cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
+        start_sh_parser()
         await q.edit_message_text("✅ Сборщик шорт-хоккея запущен.\n\n" + sh_collector_text(),
                                   parse_mode="HTML", reply_markup=sh_collector_kb())
 
@@ -872,6 +886,9 @@ def main():
     for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
         collector_periods_db.init_db(_db)
     sh_collector_db.init_db()
+    # Автозапуск парсеров при старте бота (в т.ч. после рестарта сервиса).
+    start_parser()
+    start_sh_parser()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
     app = Application.builder().token(BOT_TOKEN).request(request).build()
