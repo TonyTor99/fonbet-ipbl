@@ -338,6 +338,43 @@ def bot_stats(strategy: str) -> dict:
     }
 
 
+def bot_stats_by_league(strategy: str) -> dict[str, dict]:
+    """То же, что bot_stats, но с разбивкой по лигам (GROUP BY league).
+    Возвращает {league_name: {...та же структура, что у bot_stats...}}.
+    Учитываются только реально отправленные сигналы (in_window=1, muted=0)."""
+    conn = _conn()
+    base = "FROM signals WHERE strategy=? AND in_window=1 AND muted=0"
+    rows = conn.execute(f"""
+        SELECT
+            league,
+            COUNT(*)                                          AS matches,
+            SUM(CASE WHEN qualified=1 THEN 1 ELSE 0 END)      AS signals,
+            SUM(CASE WHEN qualified=1 AND result='Выигрыш'  THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN qualified=1 AND result='Проигрыш' THEN 1 ELSE 0 END) AS losses,
+            SUM(CASE WHEN qualified=1 AND result IS NULL     THEN 1 ELSE 0 END) AS no_result,
+            SUM(CASE WHEN qualified=1 AND line IS NULL       THEN 1 ELSE 0 END) AS void,
+            COALESCE(SUM(CASE WHEN qualified=1 THEN profit ELSE 0 END), 0)      AS profit
+        {base}
+        GROUP BY league
+    """, (strategy,)).fetchall()
+    conn.close()
+    out: dict[str, dict] = {}
+    for r in rows:
+        wins, losses = r["wins"], r["losses"]
+        settled = wins + losses
+        winrate = (wins / settled * 100) if settled else 0.0
+        staked = settled * STAKE
+        profit = r["profit"]
+        roi = (profit / staked * 100) if staked else 0.0
+        out[r["league"]] = {
+            "matches": r["matches"], "signals": r["signals"], "wins": wins,
+            "losses": losses, "no_result": r["no_result"], "void": r["void"],
+            "profit": profit, "balance": BANKROLL_START + profit,
+            "winrate": winrate, "staked": staked, "roi": roi,
+        }
+    return out
+
+
 def active_count() -> int:
     conn = _conn()
     n = conn.execute("SELECT COUNT(*) FROM signals WHERE result IS NULL AND line IS NOT NULL").fetchone()[0]

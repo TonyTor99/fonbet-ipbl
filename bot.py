@@ -292,15 +292,30 @@ def stats_text() -> str:
         lines += ["", "", f"🤖 <b>{name.upper()}</b>", ""]
         if code == "prime_info":
             lines.append(f"🔔 Уведомлений в перерыве: {s['matches']}")
-        else:
-            lines.append(f"📌 Перерывов: {s['matches']} | Сигналов: {s['signals']}")
-            lines.append(f"✅ Плюсовые: {s['wins']} | ❌ Минусовые: {s['losses']} | ⏸️ Без итога: {s['no_result']}")
-            if s["wins"] + s["losses"] > 0:
-                bal = f"{s['balance']:,.0f}".replace(",", " ")
-                lines.append(f"📈 Винрейт: {s['winrate']:.0f}%")
-                lines.append(f"🧮 ROI: {s['roi']:+.1f}%")
-                lines.append(f"💰 Прибыль: {money(s['profit'])}")
-                lines.append(f"🏦 Баланс: {bal}₽")
+            continue
+
+        lines.append("<b>Общая статистика</b>")
+        lines.append(f"📌 Перерывов: {s['matches']} | Сигналов: {s['signals']}")
+        lines.append(f"✅ Плюсовые: {s['wins']} | ❌ Минусовые: {s['losses']} | ⏸️ Без итога: {s['no_result']}")
+        if s["wins"] + s["losses"] > 0:
+            bal = f"{s['balance']:,.0f}".replace(",", " ")
+            lines.append(f"📈 Винрейт: {s['winrate']:.0f}%")
+            lines.append(f"🧮 ROI: {s['roi']:+.1f}%")
+            lines.append(f"💰 Прибыль: {money(s['profit'])}")
+            lines.append(f"🏦 Баланс: {bal}₽")
+
+        # разбивка по лигам (порядок как в LEAGUES)
+        by_lg = database.bot_stats_by_league(code)
+        for _sid, (lg_name, _div) in LEAGUES.items():
+            ls = by_lg.get(lg_name)
+            if not ls or ls["matches"] == 0:
+                continue
+            lines += ["", f"🏀 <b>{league_short(lg_name)}</b>"]
+            lines.append(f"📌 Перерывов: {ls['matches']} | Сигналов: {ls['signals']}")
+            lines.append(f"✅ {ls['wins']} | ❌ {ls['losses']} | ⏸️ {ls['no_result']}")
+            if ls["wins"] + ls["losses"] > 0:
+                lines.append(f"🎯 Винрейт: {ls['winrate']:.0f}% | ROI: {ls['roi']:+.1f}%")
+                lines.append(f"💰 Прибыль: {money(ls['profit'])}")
     return "\n".join(lines)
 
 
