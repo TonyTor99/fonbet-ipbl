@@ -77,6 +77,12 @@ def init_db():
             threshold  REAL,                        -- запас формулы для ЭТОЙ лиги (NULL = дефолт config.THRESHOLD)
             updated_at TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS report_state (
+            kind       TEXT PRIMARY KEY,            -- 'weekly' | 'monthly'
+            marker     TEXT,                        -- за какой период уже отправлен ('YYYY-MM-DD' понедельника / 'YYYY-MM')
+            updated_at TEXT
+        );
     """)
     conn.commit()
     # миграции для уже существующей БД
@@ -380,6 +386,54 @@ def active_count() -> int:
     n = conn.execute("SELECT COUNT(*) FROM signals WHERE result IS NULL AND line IS NOT NULL").fetchone()[0]
     conn.close()
     return n
+
+
+# --- отчёты о прибыли (недельный/месячный) ---------------------------------
+# Считаем ту же прибыль, что и статистика стратегии «Сигнал ТМ»: только реально
+# сыгранные сигналы (qualified=1, в окне работы, лига включена). Группировка по
+# дню создания сигнала (created_at пишется в МСК) — это день матча.
+
+_PROFIT_WHERE = ("strategy='signal_tm' AND qualified=1 AND in_window=1 AND muted=0")
+
+
+def profit_by_day(start: str, end: str) -> dict[str, float]:
+    """{'YYYY-MM-DD': прибыль_₽} по дням в диапазоне [start, end] включительно.
+    Дни без сигналов в словаре отсутствуют (заполняются нулём вызывающей стороной)."""
+    conn = _conn()
+    rows = conn.execute(
+        f"SELECT date(created_at) AS d, COALESCE(SUM(profit), 0) AS p "
+        f"FROM signals WHERE {_PROFIT_WHERE} AND date(created_at) BETWEEN ? AND ? "
+        f"GROUP BY d", (start, end)).fetchall()
+    conn.close()
+    return {r["d"]: r["p"] for r in rows}
+
+
+def profit_total(start: str, end: str) -> float:
+    """Суммарная прибыль ₽ за диапазон дат [start, end] включительно."""
+    conn = _conn()
+    v = conn.execute(
+        f"SELECT COALESCE(SUM(profit), 0) FROM signals "
+        f"WHERE {_PROFIT_WHERE} AND date(created_at) BETWEEN ? AND ?",
+        (start, end)).fetchone()[0]
+    conn.close()
+    return v
+
+
+def get_report_marker(kind: str) -> str | None:
+    conn = _conn()
+    row = conn.execute("SELECT marker FROM report_state WHERE kind=?", (kind,)).fetchone()
+    conn.close()
+    return row["marker"] if row else None
+
+
+def set_report_marker(kind: str, marker: str):
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO report_state (kind, marker, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(kind) DO UPDATE SET marker=excluded.marker, updated_at=excluded.updated_at",
+        (kind, marker, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
 
 
 def clear_db():

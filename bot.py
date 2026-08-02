@@ -3,6 +3,7 @@
 /start — панель. Управление парсером, статистика стратегий (винрейт+прибыль),
 chat_id и окно работы (МСК) на каждую стратегию, сброс БД.
 """
+import asyncio
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
@@ -15,6 +16,7 @@ from telegram.request import HTTPXRequest
 
 import database
 import signals
+import reports
 import collector_db
 import collector_periods_db
 import export_prime
@@ -151,6 +153,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [toggle],
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
+        [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
         [InlineKeyboardButton("🎯 Стратегия", callback_data="strat")],
     ])
@@ -275,6 +278,14 @@ def stats_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def reports_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Недельный отчёт → канал", callback_data="rep_week")],
+        [InlineKeyboardButton("📤 Месячный отчёт → канал", callback_data="rep_month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
 def league_short(name: str) -> str:
     """'Россия. IPBL. Женщины. Pro Division' -> 'Женщины. Pro Division'."""
     return name.replace("Россия.", "").replace("IPBL.", "").strip(" .")
@@ -338,6 +349,75 @@ def stats_text() -> str:
                 lines.append(f"🎯 Винрейт: {ls['winrate']:.0f}% | ROI: {ls['roi']:+.1f}%")
                 lines.append(f"💰 Прибыль: {money(ls['profit'])}")
     return "\n".join(lines)
+
+
+def reports_text() -> str:
+    cid = database.get_chat_id("signal_tm")
+    target = f"<code>{cid}</code>" if cid is not None else "❗️ не задан (задай chat_id «Сигнал ТМ»)"
+    return (
+        "📈 <b>Отчёты прибыли</b>\n\n"
+        "Процент прибыли считается от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Недельный</b> — автоматически в понедельник 09:00 МСК (за прошедшую неделю Пн–Вс, с разбивкой по дням).\n"
+        "• <b>Месячный</b> — автоматически 1-го числа 09:00 МСК (итог за прошедший месяц).\n\n"
+        f"Отчёты уходят в канал «Сигнал ТМ»: {target}\n\n"
+        "Кнопки ниже — отправить вручную прямо сейчас."
+    )
+
+
+async def _send_report(bot, text: str):
+    """Публикует отчёт в канал стратегии «Сигнал ТМ». (ok, err_text)."""
+    cid = database.get_chat_id("signal_tm")
+    if cid is None:
+        return False, "chat_id стратегии «Сигнал ТМ» не задан (задай в «Стратегия → Чаты стратегий»)."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+async def send_weekly_report(bot):
+    return await _send_report(bot, reports.build_weekly_text())
+
+
+async def send_monthly_report(bot):
+    return await _send_report(bot, reports.build_monthly_text())
+
+
+# --- планировщик отчётов (без JobQueue: лёгкий asyncio-таск) ----------------
+# JobQueue у PTB требует extra [job-queue]; чтобы не тянуть зависимость на VPS,
+# проверяем время сами раз в минуту. Маркер уже отправленного периода лежит в БД
+# (report_state), поэтому рестарт сервиса не приводит к повторной отправке, а
+# запуск бота позже 09:00 в нужный день всё равно доотправит отчёт (catch-up).
+
+async def _report_scheduler(app):
+    while True:
+        try:
+            now = datetime.now(MSK)
+            # Недельный: понедельник, начиная с 09:00 МСК.
+            if now.weekday() == 0 and now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")          # дата этого понедельника
+                if database.get_report_marker("weekly") != marker:
+                    ok, err = await send_weekly_report(app.bot)
+                    if ok:
+                        database.set_report_marker("weekly", marker)
+                        print(f"[REPORT] weekly sent for {marker}")
+                    else:
+                        print(f"[REPORT] weekly NOT sent: {err}")
+            # Месячный: 1-е число, начиная с 09:00 МСК.
+            if now.day == 1 and now.hour >= 9:
+                marker = now.strftime("%Y-%m")             # этот месяц
+                if database.get_report_marker("monthly") != marker:
+                    ok, err = await send_monthly_report(app.bot)
+                    if ok:
+                        database.set_report_marker("monthly", marker)
+                        print(f"[REPORT] monthly sent for {marker}")
+                    else:
+                        print(f"[REPORT] monthly NOT sent: {err}")
+        except Exception as e:
+            print(f"[REPORT sched error] {e}")
+        await asyncio.sleep(60)
 
 
 def collectors_text() -> str:
@@ -553,6 +633,20 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 pass
         await ctx.bot.send_message(q.message.chat_id, stats_text(),
                                    parse_mode="HTML", reply_markup=stats_kb())
+
+    elif data == "reports":
+        await q.edit_message_text(reports_text(), parse_mode="HTML", reply_markup=reports_kb())
+
+    elif data in ("rep_week", "rep_month"):
+        weekly = data == "rep_week"
+        text = reports.build_weekly_text() if weekly else reports.build_monthly_text()
+        ok, err = await (send_weekly_report(ctx.bot) if weekly else send_monthly_report(ctx.bot))
+        title = "Недельный" if weekly else "Месячный"
+        if ok:
+            head = f"✅ {title} отчёт отправлен в канал. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=reports_kb())
 
     elif data == "collectors":
         await q.edit_message_text(collectors_text(), parse_mode="HTML",
@@ -879,6 +973,12 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     print(f"[BOT ERROR] {ctx.error}")
 
 
+async def _post_init(app):
+    """Стартует фоновый планировщик отчётов на общем event loop бота."""
+    app.create_task(_report_scheduler(app))
+    print("Report scheduler started (weekly Mon 09:00 MSK, monthly 1st 09:00 MSK).")
+
+
 def main():
     database.init_db()
     for _name, _db in COLLECTOR_LEAGUES.values():
@@ -891,7 +991,8 @@ def main():
     start_sh_parser()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
-    app = Application.builder().token(BOT_TOKEN).request(request).build()
+    app = (Application.builder().token(BOT_TOKEN).request(request)
+           .post_init(_post_init).build())
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
