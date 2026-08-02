@@ -23,9 +23,11 @@ import database
 import signals
 import collector
 import collector_db
+import collector_periods
+import collector_periods_db
 from config import (LINE_SERVERS, HEADERS, SCOPE_MARKET, POLL_INTERVAL, MAX_WORKERS,
                     LEAGUES, HALFTIME_TS, HALFTIME_TOL_AFTER, MATCH_TOTAL_FIDS,
-                    COLLECTOR_LEAGUES)
+                    COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES)
 
 log = logging.getLogger("parser")
 MSK = timezone(timedelta(hours=3))
@@ -149,6 +151,8 @@ def _finalize(eid: int, comment: str = ""):
     sid = (_known.get(eid) or {}).get("sportId")
     if sid in COLLECTOR_LEAGUES:
         collector.resolve(eid, s1, s2, COLLECTOR_LEAGUES[sid][1])
+    if sid in PERIOD_COLLECTOR_LEAGUES:
+        collector_periods.resolve(eid, quarters, s1, s2, PERIOD_COLLECTOR_LEAGUES[sid][1])
     _known.pop(eid, None)
     _last_score.pop(eid, None)
     _last_comment.pop(eid, None)
@@ -249,6 +253,13 @@ def run_cycle() -> list[dict]:
             except Exception as e:
                 log.warning("collector err ev=%s: %s", eid, e)
 
+        if meta["sportId"] in PERIOD_COLLECTOR_LEAGUES:
+            try:
+                collector_periods.process(state, api_map.get(eid),
+                                          PERIOD_COLLECTOR_LEAGUES[meta["sportId"]][1])
+            except Exception as e:
+                log.warning("collector_periods err ev=%s: %s", eid, e)
+
         results.append(state)
     return results
 
@@ -306,11 +317,15 @@ def main():
     database.init_db()
     for _name, _db in COLLECTOR_LEAGUES.values():
         collector_db.init_db(_db)
+    for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
+        collector_periods_db.init_db(_db)
     if args.reset:
         database.clear_db()
         for _name, _db in COLLECTOR_LEAGUES.values():
             collector_db.clear_db(_db)
-        print("БД очищена (сигналы + все сборщики IPBL).")
+        for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
+            collector_periods_db.clear_db(_db)
+        print("БД очищена (сигналы + все сборщики IPBL + сборщики четвертей).")
 
     print(f"Fonbet IPBL Parser | интервал={POLL_INTERVAL}с | расписание по МСК")
     print("Лиги:", ", ".join(n for n, _ in LEAGUES.values()))

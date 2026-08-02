@@ -16,12 +16,14 @@ from telegram.request import HTTPXRequest
 import database
 import signals
 import collector_db
+import collector_periods_db
 import export_prime
+import export_periods
 import export_signals
 import sh_collector_db
 import export_shorthockey
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
-                    COLLECTOR_LEAGUES)
+                    COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -140,10 +142,12 @@ def back_kb() -> InlineKeyboardMarkup:
 # --- хаб «Сборщики»: все сборщики в одном месте ----------------------------
 
 def collectors_kb() -> InlineKeyboardMarkup:
-    """Список всех сборщиков: 4 лиги IPBL (в свои БД) + шорт-хоккей."""
+    """Список всех сборщиков: 4 лиги IPBL (за матч) + четверти Pro + шорт-хоккей."""
     rows = []
     for sid, (name, _db) in COLLECTOR_LEAGUES.items():
         rows.append([InlineKeyboardButton(f"🏀 IPBL · {name}", callback_data=f"col:{sid}")])
+    for sid, (name, _db) in PERIOD_COLLECTOR_LEAGUES.items():
+        rows.append([InlineKeyboardButton(f"🏀 Четверти · {name}", callback_data=f"pcol:{sid}")])
     rows.append([InlineKeyboardButton("🏒 Шорт-хоккей", callback_data="sh_collector")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(rows)
@@ -162,6 +166,22 @@ def confirm_col_reset_kb(sport_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Да, удалить", callback_data=f"colry:{sport_id}"),
         InlineKeyboardButton("❌ Отмена", callback_data=f"col:{sport_id}"),
+    ]])
+
+
+def period_collector_kb(sport_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Выгрузить Excel", callback_data=f"pcolx:{sport_id}")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data=f"pcol:{sport_id}")],
+        [InlineKeyboardButton("🗑 Сбросить БД четвертей", callback_data=f"pcolr:{sport_id}")],
+        [InlineKeyboardButton("⬅️ К сборщикам", callback_data="collectors")],
+    ])
+
+
+def confirm_period_reset_kb(sport_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"pcolry:{sport_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"pcol:{sport_id}"),
     ]])
 
 
@@ -297,6 +317,11 @@ def collectors_text() -> str:
         st = collector_db.stats(db)
         lines.append(f"• <b>{name}</b>: матчей {st['events']} · строк {st['rows']}")
     lines.append("")
+    lines.append("Рынки по четвертям (только Pro, строка на четверть):")
+    for sid, (name, db) in PERIOD_COLLECTOR_LEAGUES.items():
+        st = collector_periods_db.stats(db)
+        lines.append(f"• <b>{name}</b>: матчей {st['events']} · строк {st['rows']}")
+    lines.append("")
     lines.append("Выбери сборщик для выгрузки/сброса ⤵️")
     return "\n".join(lines)
 
@@ -322,6 +347,31 @@ def collector_text(sport_id: int) -> str:
             lines.append(f"• {e['team1']} — {e['team2']}: {e['minutes']} мин · {fin}")
     else:
         lines.append("Пока пусто — ждём live-матч этой лиги.")
+    return "\n".join(lines)
+
+
+def period_collector_text(sport_id: int) -> str:
+    name, db = PERIOD_COLLECTOR_LEAGUES[sport_id]
+    st = collector_periods_db.stats(db)
+    lines = [
+        f"🏀 <b>Сборщик четвертей · {name}</b>",
+        f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}",
+        f"Файл: <code>{db}</code>",
+        "Рынки каждой четверти отдельно (фора/тотал/ИТ/1X2), строка на четверть.",
+        "",
+        f"Матчей собрано: <b>{st['events']}</b>",
+        f"Строк (четвертей × минут): <b>{st['rows']}</b>",
+        f"С результатом: <b>{st['resolved']}</b>",
+        "",
+    ]
+    summ = collector_periods_db.events_summary(db, 15)
+    if summ:
+        lines.append("Последние матчи:")
+        for e in summ:
+            fin = e["final_score"] if e["final_score"] else "идёт"
+            lines.append(f"• {e['team1']} — {e['team2']}: {e['minutes']} стр · {fin}")
+    else:
+        lines.append("Пока пусто — ждём live-матч Pro-дивизиона.")
     return "\n".join(lines)
 
 
@@ -543,6 +593,74 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"✅ БД сборщика IPBL · {name} очищена.\n\n" + collector_text(sid),
                                   parse_mode="HTML", reply_markup=collector_kb(sid))
 
+    elif data.startswith("pcol:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in PERIOD_COLLECTOR_LEAGUES:
+            return
+        await q.edit_message_text(period_collector_text(sid), parse_mode="HTML",
+                                  reply_markup=period_collector_kb(sid))
+
+    elif data.startswith("pcolx:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in PERIOD_COLLECTOR_LEAGUES:
+            return
+        name, db = PERIOD_COLLECTOR_LEAGUES[sid]
+        st = collector_periods_db.stats(db)
+        if st["rows"] == 0:
+            await q.edit_message_text(f"📦 Четверти {name}: пока пусто — нечего выгружать.",
+                                      parse_mode="HTML", reply_markup=period_collector_kb(sid))
+            return
+        await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        fname = Path(db).stem
+        path = DIR / f"{fname}_{ts}.xlsx"
+        try:
+            export_periods.build(str(path), db, f"Четверти {name}")
+            with open(path, "rb") as fp:
+                await ctx.bot.send_document(
+                    chat_id=q.message.chat_id, document=fp, filename=path.name,
+                    caption=f"📦 Четверти IPBL · {name} · матчей {st['events']} · строк {st['rows']}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, period_collector_text(sid),
+                                   parse_mode="HTML", reply_markup=period_collector_kb(sid))
+
+    elif data.startswith("pcolr:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in PERIOD_COLLECTOR_LEAGUES:
+            return
+        name = PERIOD_COLLECTOR_LEAGUES[sid][0]
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить все снимки сборщика четвертей · {name}?</b>\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_period_reset_kb(sid))
+
+    elif data.startswith("pcolry:"):
+        try:
+            sid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if sid not in PERIOD_COLLECTOR_LEAGUES:
+            return
+        name, db = PERIOD_COLLECTOR_LEAGUES[sid]
+        collector_periods_db.clear_db(db)
+        await q.edit_message_text(f"✅ БД сборщика четвертей · {name} очищена.\n\n"
+                                  + period_collector_text(sid),
+                                  parse_mode="HTML", reply_markup=period_collector_kb(sid))
+
     elif data == "sh_collector":
         await q.edit_message_text(sh_collector_text(), parse_mode="HTML",
                                   reply_markup=sh_collector_kb())
@@ -736,6 +854,8 @@ def main():
     database.init_db()
     for _name, _db in COLLECTOR_LEAGUES.values():
         collector_db.init_db(_db)
+    for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
+        collector_periods_db.init_db(_db)
     sh_collector_db.init_db()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
