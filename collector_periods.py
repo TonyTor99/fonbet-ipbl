@@ -59,35 +59,34 @@ def _period_blocks(api_data, root_id: int) -> list[tuple[int, list[dict]]]:
     return out
 
 
-def _avg_market(factors: list[dict], b_fids, m_fids):
-    """Среднее по ВСЕМ доступным линиям рынка (тотал/инд.тотал) четверти.
+def _mid_market(factors: list[dict], b_fids, m_fids):
+    """Средняя РЕАЛЬНАЯ линия рынка (тотал/инд.тотал) четверти + её реальные кф.
 
     Берём линии, где котируются обе стороны (Б и М) — это ровно линии из
-    выпадающего списка. Возвращает (средняя_линия, средний_кф_Б, средний_кф_М)
-    или (None, None, None), если рынок не котируется."""
+    выпадающего списка, — и выбираем среднюю по позиции (медиану). При чётном
+    числе линий берём верхнюю из двух центральных. Возвращает
+    (линия, кф_Б, кф_М) или (None, None, None), если рынок не котируется."""
     bb = collector._by_line(factors, b_fids)
     mm = collector._by_line(factors, m_fids)
     both = sorted(set(bb) & set(mm))
     if not both:
         return None, None, None
-    line = round(sum(both) / len(both), 2)
-    b_odds = round(sum(bb[l] for l in both) / len(both), 3)
-    m_odds = round(sum(mm[l] for l in both) / len(both), 3)
-    return line, b_odds, m_odds
+    line = both[len(both) // 2]
+    return line, bb[line], mm[line]
 
 
 def _extract_period_markets(factors: list[dict]) -> dict:
     """Рынки четверти: фора/победа — крайняя линия (как в матче) + ничья X;
-    тотал / инд.тотал1 / инд.тотал2 — СРЕДНЕЕ всех доступных линий (линия и кф)."""
+    тотал / инд.тотал1 / инд.тотал2 — СРЕДНЯЯ реальная линия из выпадающего списка."""
     m = collector.extract_markets(factors)
     m["winx_odds"] = collector._odds(factors, WINX_FID)
-    # Тотал и инд.тоталы — усредняем по всему выпадающему списку линий.
+    # Тотал и инд.тоталы — средняя реальная линия из всего списка.
     for pref, b_fids, m_fids in (
         ("total", TOTAL_B_FIDS, TOTAL_M_FIDS),
         ("it1", IT1_B_FIDS, IT1_M_FIDS),
         ("it2", IT2_B_FIDS, IT2_M_FIDS),
     ):
-        line, b_odds, m_odds = _avg_market(factors, b_fids, m_fids)
+        line, b_odds, m_odds = _mid_market(factors, b_fids, m_fids)
         if line is not None:
             m[f"{pref}_line"] = line
             m[f"{pref}_b_odds"] = b_odds
@@ -145,17 +144,9 @@ def _wl(win: bool) -> str:
     return "Выигрыш" if win else "Проигрыш"
 
 
-def _ou(total: int, line: float) -> tuple[str, str]:
-    """Результат (Больше, Меньше) для тотала. Средняя линия может быть целой →
-    при равенстве total == line обе стороны получают Возврат (пуш)."""
-    if total == line:
-        return "Возврат", "Возврат"
-    over = total > line
-    return _wl(over), _wl(not over)
-
-
 def _resolve_row(r: dict, q1: int, q2: int) -> dict:
-    """Результаты рынков четверти считаются по счёту ЭТОЙ четверти (q1:q2)."""
+    """Результаты рынков четверти считаются по счёту ЭТОЙ четверти (q1:q2).
+    Все линии реальные (.5) → без пуша."""
     res = {}
     # Победа / ничья (в четверти возможен ничейный исход)
     if any(r.get(k) is not None for k in ("win1_odds", "winx_odds", "win2_odds")):
@@ -167,19 +158,25 @@ def _resolve_row(r: dict, q1: int, q2: int) -> dict:
     if fl is not None:
         c1 = (q1 + fl) > q2
         res["r_fora1"] = _wl(c1)
-        res["r_fora2"] = _wl(not c1)   # линии .5 → без пуша
-    # Тотал четверти (средняя линия — возможен возврат при целой линии)
+        res["r_fora2"] = _wl(not c1)
+    # Тотал четверти
     tl = r.get("total_line")
     if tl is not None:
-        res["r_total_b"], res["r_total_m"] = _ou(q1 + q2, tl)
+        over = (q1 + q2) > tl
+        res["r_total_b"] = _wl(over)
+        res["r_total_m"] = _wl(not over)
     # Инд. тотал К1
     i1 = r.get("it1_line")
     if i1 is not None:
-        res["r_it1_b"], res["r_it1_m"] = _ou(q1, i1)
+        over = q1 > i1
+        res["r_it1_b"] = _wl(over)
+        res["r_it1_m"] = _wl(not over)
     # Инд. тотал К2
     i2 = r.get("it2_line")
     if i2 is not None:
-        res["r_it2_b"], res["r_it2_m"] = _ou(q2, i2)
+        over = q2 > i2
+        res["r_it2_b"] = _wl(over)
+        res["r_it2_m"] = _wl(not over)
     return res
 
 

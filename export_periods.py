@@ -62,7 +62,6 @@ HEAD_FILL = PatternFill("solid", fgColor="1F4E78")
 HEAD_FONT = Font(bold=True, color="FFFFFF")
 WIN_FILL = PatternFill("solid", fgColor="C6EFCE")    # зелёный
 LOSE_FILL = PatternFill("solid", fgColor="FFC7CE")   # красный
-PUSH_FILL = PatternFill("solid", fgColor="FFEB9C")   # жёлтый (Возврат)
 THIN = Side(style="thin", color="D9D9D9")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 RESULT_KEYS = {h for h, k in COLUMNS if k and k.startswith("r_")}
@@ -105,8 +104,7 @@ def build(path: str, db: str, title: str = "Рынки четвертей IPBL")
             cell = ws.cell(r, c, val)
             cell.border = BORDER
             if head in RESULT_KEYS and val:
-                cell.fill = (WIN_FILL if val == "Выигрыш"
-                             else PUSH_FILL if val == "Возврат" else LOSE_FILL)
+                cell.fill = WIN_FILL if val == "Выигрыш" else LOSE_FILL
                 cell.alignment = Alignment(horizontal="center")
 
     # ширины
