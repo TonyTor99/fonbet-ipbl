@@ -14,9 +14,10 @@ import logging
 import re
 from datetime import datetime, timezone, timedelta
 
-import collector          # переиспользуем extract_markets / _odds
+import collector          # переиспользуем extract_markets / _by_line / _odds
 import collector_periods_db
-from config import WINX_FID
+from config import (WINX_FID, TOTAL_B_FIDS, TOTAL_M_FIDS,
+                    IT1_B_FIDS, IT1_M_FIDS, IT2_B_FIDS, IT2_M_FIDS)
 
 log = logging.getLogger("collector_periods")
 MSK = timezone(timedelta(hours=3))
@@ -58,10 +59,39 @@ def _period_blocks(api_data, root_id: int) -> list[tuple[int, list[dict]]]:
     return out
 
 
+def _avg_market(factors: list[dict], b_fids, m_fids):
+    """Среднее по ВСЕМ доступным линиям рынка (тотал/инд.тотал) четверти.
+
+    Берём линии, где котируются обе стороны (Б и М) — это ровно линии из
+    выпадающего списка. Возвращает (средняя_линия, средний_кф_Б, средний_кф_М)
+    или (None, None, None), если рынок не котируется."""
+    bb = collector._by_line(factors, b_fids)
+    mm = collector._by_line(factors, m_fids)
+    both = sorted(set(bb) & set(mm))
+    if not both:
+        return None, None, None
+    line = round(sum(both) / len(both), 2)
+    b_odds = round(sum(bb[l] for l in both) / len(both), 3)
+    m_odds = round(sum(mm[l] for l in both) / len(both), 3)
+    return line, b_odds, m_odds
+
+
 def _extract_period_markets(factors: list[dict]) -> dict:
-    """Рынки четверти = рынки матча (та же логика) + ничья X."""
+    """Рынки четверти: фора/победа — крайняя линия (как в матче) + ничья X;
+    тотал / инд.тотал1 / инд.тотал2 — СРЕДНЕЕ всех доступных линий (линия и кф)."""
     m = collector.extract_markets(factors)
     m["winx_odds"] = collector._odds(factors, WINX_FID)
+    # Тотал и инд.тоталы — усредняем по всему выпадающему списку линий.
+    for pref, b_fids, m_fids in (
+        ("total", TOTAL_B_FIDS, TOTAL_M_FIDS),
+        ("it1", IT1_B_FIDS, IT1_M_FIDS),
+        ("it2", IT2_B_FIDS, IT2_M_FIDS),
+    ):
+        line, b_odds, m_odds = _avg_market(factors, b_fids, m_fids)
+        if line is not None:
+            m[f"{pref}_line"] = line
+            m[f"{pref}_b_odds"] = b_odds
+            m[f"{pref}_m_odds"] = m_odds
     return m
 
 
@@ -115,6 +145,15 @@ def _wl(win: bool) -> str:
     return "Выигрыш" if win else "Проигрыш"
 
 
+def _ou(total: int, line: float) -> tuple[str, str]:
+    """Результат (Больше, Меньше) для тотала. Средняя линия может быть целой →
+    при равенстве total == line обе стороны получают Возврат (пуш)."""
+    if total == line:
+        return "Возврат", "Возврат"
+    over = total > line
+    return _wl(over), _wl(not over)
+
+
 def _resolve_row(r: dict, q1: int, q2: int) -> dict:
     """Результаты рынков четверти считаются по счёту ЭТОЙ четверти (q1:q2)."""
     res = {}
@@ -129,24 +168,18 @@ def _resolve_row(r: dict, q1: int, q2: int) -> dict:
         c1 = (q1 + fl) > q2
         res["r_fora1"] = _wl(c1)
         res["r_fora2"] = _wl(not c1)   # линии .5 → без пуша
-    # Тотал четверти
+    # Тотал четверти (средняя линия — возможен возврат при целой линии)
     tl = r.get("total_line")
     if tl is not None:
-        over = (q1 + q2) > tl
-        res["r_total_b"] = _wl(over)
-        res["r_total_m"] = _wl(not over)
+        res["r_total_b"], res["r_total_m"] = _ou(q1 + q2, tl)
     # Инд. тотал К1
     i1 = r.get("it1_line")
     if i1 is not None:
-        over = q1 > i1
-        res["r_it1_b"] = _wl(over)
-        res["r_it1_m"] = _wl(not over)
+        res["r_it1_b"], res["r_it1_m"] = _ou(q1, i1)
     # Инд. тотал К2
     i2 = r.get("it2_line")
     if i2 is not None:
-        over = q2 > i2
-        res["r_it2_b"] = _wl(over)
-        res["r_it2_m"] = _wl(not over)
+        res["r_it2_b"], res["r_it2_m"] = _ou(q2, i2)
     return res
 
 

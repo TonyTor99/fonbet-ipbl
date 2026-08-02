@@ -50,7 +50,7 @@ def init_db(db: str):
             fora_line     REAL,               -- линия форы со стороны К1 (напр. -2.5)
             fora1_odds    REAL,               -- кф Фора К1
             fora2_odds    REAL,               -- кф Фора К2
-            total_line    REAL,
+            total_line    REAL,               -- СРЕДНЕЕ всех доступных линий тотала четверти
             total_b_odds  REAL,
             total_m_odds  REAL,
             it1_line      REAL,
