@@ -214,10 +214,6 @@ def render_signal(sig: dict) -> str:
     lines.append("")
     odds_part = f" @{fmt_odds_dot(sig['odds'])}" if sig.get("odds") is not None else ""
     lines.append(f"🎯 <b>ТМ {fmt_line_dot(sig['line'])}{odds_part}</b>")
-    if sig.get("line_move"):
-        lines.append(f"📈 Линия: {html.escape(sig['line_move'])}")
-    if sig.get("formula_value") is not None:
-        lines.append(f"🧮 <b>Запас:  {fmt_signed1_dot(sig['formula_value'])}</b>")
     if sig.get("final_score"):
         lines.append("")
         tot = sig.get("final_total")
