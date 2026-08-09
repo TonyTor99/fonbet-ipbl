@@ -215,7 +215,6 @@ def render_signal(sig: dict) -> str:
     odds_part = f" @{fmt_odds_dot(sig['odds'])}" if sig.get("odds") is not None else ""
     lines.append(f"🎯 <b>ТМ {fmt_line_dot(sig['line'])}{odds_part}</b>")
     if sig.get("final_score"):
-        lines.append("")
         tot = sig.get("final_total")
         tot_part = f"  ({tot})" if tot is not None else ""
         lines.append(f"🏁 <b>Итог: {html.escape(str(sig['final_score']))}{tot_part}</b>")

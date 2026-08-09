@@ -26,6 +26,7 @@ COLUMNS = [
     ("Игр. мин.", "game_minute"),
     ("Четверть", "quarter"),
     ("Счёт матча", "__score"),
+    ("Счёт четв. тек.", "q_live_score"),
     ("Фора К1", "fora_line"),
     ("Фора К2", "__fora2_line"),
     ("Фора П1 кф", "fora1_odds"),

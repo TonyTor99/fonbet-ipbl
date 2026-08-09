@@ -112,11 +112,17 @@ def process(state: dict, api_data, db: str):
         return  # нет рынков четвертей в этом цикле — попробуем на следующем
 
     now = datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S")
+    quarters = state.get("quarters") or []   # живой счёт по четвертям из comment
     wrote = 0
     for quarter, factors in blocks:
         if collector_periods_db.snapshot_exists(db, eid, minute, quarter):
             continue
         markets = _extract_period_markets(factors)
+        # живой счёт ИМЕННО этой четверти на момент снимка (если она уже началась)
+        q_live = None
+        if 1 <= quarter <= len(quarters):
+            ql1, ql2 = quarters[quarter - 1]
+            q_live = f"{ql1}:{ql2}"
         row = {
             "event_id": eid,
             "league": state["league"],
@@ -127,6 +133,7 @@ def process(state: dict, api_data, db: str):
             "quarter": quarter,
             "score1": state["score1"],
             "score2": state["score2"],
+            "q_live_score": q_live,
             "created_at": now,
             **markets,
         }

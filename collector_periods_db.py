@@ -46,6 +46,7 @@ def init_db(db: str):
             quarter     INTEGER NOT NULL,     -- номер четверти рынка (1..4+)
             score1      INTEGER NOT NULL,     -- общий счёт матча на момент снимка
             score2      INTEGER NOT NULL,
+            q_live_score TEXT,                -- живой счёт ЭТОЙ четверти на момент снимка (напр. 11:11)
 
             fora_line     REAL,               -- линия форы со стороны К1 (напр. -2.5)
             fora1_odds    REAL,               -- кф Фора К1
@@ -78,6 +79,10 @@ def init_db(db: str):
             ON period_snapshots(event_id, game_minute, quarter);
         CREATE INDEX IF NOT EXISTS idx_ps_event ON period_snapshots(event_id);
     """)
+    # миграция старых БД: добавляем колонку живого счёта четверти, если её нет
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(period_snapshots)")}
+    if "q_live_score" not in cols:
+        conn.execute("ALTER TABLE period_snapshots ADD COLUMN q_live_score TEXT")
     conn.commit()
     conn.close()
 
@@ -96,6 +101,7 @@ def insert_snapshot(db: str, row: dict) -> int | None:
     """UNIQUE(event_id, game_minute, quarter) защищает от дублей."""
     cols = (
         "event_id, league, team1, team2, snap_dt_msk, game_minute, quarter, score1, score2, "
+        "q_live_score, "
         "fora_line, fora1_odds, fora2_odds, total_line, total_b_odds, total_m_odds, "
         "it1_line, it1_b_odds, it1_m_odds, it2_line, it2_b_odds, it2_m_odds, "
         "win1_odds, winx_odds, win2_odds, created_at"
