@@ -6,6 +6,7 @@ chat_id и окно работы (МСК) на каждую стратегию, 
 import asyncio
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -33,6 +34,10 @@ SH_LOG_FILE = DIR / "sh_parser.log"
 MSK = timezone(timedelta(hours=3))
 _proc: subprocess.Popen | None = None
 _sh_proc: subprocess.Popen | None = None
+
+# Веб-панель fonbet-dashboard (on-demand systemd-сервис на этом же VPS)
+PANEL_SERVICE = "fonbet-dashboard"
+PANEL_URL = "http://147.45.41.7:8080"
 
 
 # --- helpers ---------------------------------------------------------------
@@ -103,6 +108,23 @@ def stop_sh_parser():
     subprocess.run(["pkill", "-f", "sh_parser.py"], capture_output=True)
 
 
+def panel_running() -> bool:
+    """Запущен ли systemd-сервис веб-панели."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", "--quiet", PANEL_SERVICE], timeout=3)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def start_panel():
+    subprocess.run(["systemctl", "start", PANEL_SERVICE], capture_output=True, timeout=15)
+
+
+def stop_panel():
+    subprocess.run(["systemctl", "stop", PANEL_SERVICE], capture_output=True, timeout=15)
+
+
 def money(v: float) -> str:
     return f"{v:+,.0f}".replace(",", " ") + "₽"
 
@@ -149,6 +171,9 @@ def main_kb() -> InlineKeyboardMarkup:
     toggle = (InlineKeyboardButton("⏹ Остановить парсер", callback_data="stop")
               if parser_running() else
               InlineKeyboardButton("▶️ Запустить парсер", callback_data="start"))
+    panel_btn = (InlineKeyboardButton("⏹ Остановить веб-панель", callback_data="panel_stop")
+                 if panel_running() else
+                 InlineKeyboardButton("🖥 Запустить веб-панель", callback_data="panel_start"))
     return InlineKeyboardMarkup([
         [toggle],
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
@@ -156,6 +181,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
         [InlineKeyboardButton("🎯 Стратегия", callback_data="strat")],
+        [panel_btn],
     ])
 
 
@@ -598,6 +624,18 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("⏹ Парсер остановлен.\n\n" + panel_text(),
                                   parse_mode="HTML", reply_markup=main_kb())
 
+    elif data == "panel_start":
+        start_panel()
+        await q.edit_message_text(
+            f"🖥 <b>Веб-панель запущена</b>\n{PANEL_URL}\n\n"
+            "Сама выключится через 20 мин простоя (или кнопкой ниже).\n\n" + panel_text(),
+            parse_mode="HTML", reply_markup=main_kb(), disable_web_page_preview=True)
+
+    elif data == "panel_stop":
+        stop_panel()
+        await q.edit_message_text("⏹ Веб-панель остановлена.\n\n" + panel_text(),
+                                  parse_mode="HTML", reply_markup=main_kb())
+
     elif data == "status":
         now = datetime.now(MSK).strftime("%H:%M:%S")
         st = "🟢 работает" if parser_running() else "🔴 остановлен"
@@ -986,6 +1024,13 @@ def main():
     for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
         collector_periods_db.init_db(_db)
     sh_collector_db.init_db()
+    # Подчищаем «зависшие» парсеры от прошлого инстанса: при рестарте сервиса они
+    # умирают не мгновенно, и pgrep внутри start_parser() видит их как живые →
+    # запуск пропускается (гонка, из-за которой парсеры не поднимались). Форс-kill
+    # гарантирует чистый старт нового набора парсеров.
+    subprocess.run(["pkill", "-9", "-f", "/parser.py"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", "sh_parser.py"], capture_output=True)
+    time.sleep(1.5)
     # Автозапуск парсеров при старте бота (в т.ч. после рестарта сервиса).
     start_parser()
     start_sh_parser()
