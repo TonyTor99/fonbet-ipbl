@@ -20,6 +20,7 @@ from typing import Optional
 import requests
 
 import sh_collector_db as db
+import sh_signals
 from config import LINE_SERVERS, HEADERS, SCOPE_MARKET, POLL_INTERVAL, MAX_WORKERS
 from sh_config import (LEAGUE_PREFIX, PREMATCH_MINUTE, PREMATCH_COMMENT,
                        WIN1_FID, DRAW_FID, WIN2_FID, DC_1X_FID, DC_12_FID, DC_X2_FID,
@@ -335,6 +336,7 @@ def resolve(event_id: int, s1: int, s2: int):
 def _finalize(eid: int, comment: str = ""):
     s1, s2 = _last_score.get(eid, (0, 0))
     resolve(eid, s1, s2)
+    sh_signals.resolve(eid, s1, s2)      # дорасчёт сигналов стратегии
     _known.pop(eid, None)
     _last_score.pop(eid, None)
     _last_comment.pop(eid, None)
@@ -412,10 +414,18 @@ def run_cycle() -> list[dict]:
             "score1": s1, "score2": s2, "ts": ts, "comment": comment,
             "prematch": prematch, "periods": periods, "minute": ts // 60,
         }
+        api_data = api_map.get(eid)
         try:
-            process(state, api_map.get(eid))
+            process(state, api_data)
         except Exception as e:
             log.warning("process err ev=%s: %s", eid, e)
+        # стратегия шорт-хоккея: на строго заданной минуте по правилам лиг
+        try:
+            factors = _root_factors(api_data, eid)
+            if factors:
+                sh_signals.process_match(state, extract_markets(factors))
+        except Exception as e:
+            log.warning("sh_signal err ev=%s: %s", eid, e)
         results.append(state)
     return results
 

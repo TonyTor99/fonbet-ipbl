@@ -78,6 +78,47 @@ def init_db():
             updated_at TEXT
         );
 
+        -- Стратегия шорт-хоккея: правила по лигам. Одно правило = лига + минута +
+        -- исход (win1/draw/win2) + диапазон кф. Правил сколько угодно (одну лигу
+        -- можно завести несколькими правилами). Читается движком sh_signals каждый
+        -- цикл из общей WAL-базы — изменения из бота подхватываются без рестарта.
+        CREATE TABLE IF NOT EXISTS sh_rules (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            sport_name TEXT NOT NULL,               -- ПОЛНОЕ название лиги ("Шорт-хоккей. ...") для точного матча
+            minute     INTEGER NOT NULL,            -- игровая минута сигнала (строго ==)
+            outcome    TEXT NOT NULL,               -- 'win1' | 'draw' | 'win2'
+            kf_min     REAL NOT NULL,
+            kf_max     REAL NOT NULL,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
+        -- Отправленные сигналы стратегии шорт-хоккея (дедуп по rule_id+event_id).
+        CREATE TABLE IF NOT EXISTS sh_strat_signals (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id      INTEGER NOT NULL,
+            event_id     INTEGER NOT NULL,
+            league       TEXT NOT NULL,
+            team1        TEXT NOT NULL,
+            team2        TEXT NOT NULL,
+            rule_minute  INTEGER NOT NULL,          -- минута из правила
+            fired_minute INTEGER NOT NULL,          -- фактическая игровая минута срабатывания
+            outcome      TEXT NOT NULL,             -- win1 / draw / win2
+            odds         REAL,                      -- кф исхода на момент сигнала
+            kf_min       REAL NOT NULL,
+            kf_max       REAL NOT NULL,
+            score1       INTEGER NOT NULL,
+            score2       INTEGER NOT NULL,
+            chat_id      INTEGER,
+            message_id   INTEGER,
+            status       TEXT NOT NULL,             -- sent / no_chat
+            result       TEXT,                      -- Выигрыш / Проигрыш / NULL
+            final_score  TEXT,
+            created_at   TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shsig_unique ON sh_strat_signals(rule_id, event_id);
+        CREATE INDEX IF NOT EXISTS idx_shsig_event ON sh_strat_signals(event_id);
+
         CREATE TABLE IF NOT EXISTS report_state (
             kind       TEXT PRIMARY KEY,            -- 'weekly' | 'monthly'
             marker     TEXT,                        -- за какой период уже отправлен ('YYYY-MM-DD' понедельника / 'YYYY-MM')
@@ -444,3 +485,144 @@ def clear_db():
     conn2 = sqlite3.connect(DB_PATH)
     conn2.execute("VACUUM")
     conn2.close()
+
+
+# ===========================================================================
+# Стратегия шорт-хоккея: правила по лигам + отправленные сигналы.
+# ===========================================================================
+SH_OUTCOMES = ("win1", "draw", "win2")
+
+
+def sh_get_rules() -> list[dict]:
+    """Все правила стратегии (новые снизу — по порядку добавления)."""
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM sh_rules ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def sh_get_rule(rule_id: int) -> dict | None:
+    conn = _conn()
+    row = conn.execute("SELECT * FROM sh_rules WHERE id=?", (rule_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def sh_add_rule(sport_name: str, minute: int, outcome: str,
+                kf_min: float, kf_max: float) -> int:
+    conn = _conn()
+    cur = conn.execute(
+        "INSERT INTO sh_rules (sport_name, minute, outcome, kf_min, kf_max, enabled, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 1, ?)",
+        (sport_name, int(minute), outcome, float(kf_min), float(kf_max),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def sh_update_rule(rule_id: int, minute: int, outcome: str,
+                   kf_min: float, kf_max: float):
+    conn = _conn()
+    conn.execute(
+        "UPDATE sh_rules SET minute=?, outcome=?, kf_min=?, kf_max=? WHERE id=?",
+        (int(minute), outcome, float(kf_min), float(kf_max), rule_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def sh_delete_rule(rule_id: int):
+    conn = _conn()
+    conn.execute("DELETE FROM sh_rules WHERE id=?", (rule_id,))
+    conn.commit()
+    conn.close()
+
+
+def sh_toggle_rule(rule_id: int) -> bool:
+    """Переключает вкл/выкл правила, возвращает новое состояние."""
+    conn = _conn()
+    row = conn.execute("SELECT enabled FROM sh_rules WHERE id=?", (rule_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return False
+    new_state = 0 if row["enabled"] else 1
+    conn.execute("UPDATE sh_rules SET enabled=? WHERE id=?", (new_state, rule_id))
+    conn.commit()
+    conn.close()
+    return bool(new_state)
+
+
+def sh_signal_exists(rule_id: int, event_id: int) -> bool:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM sh_strat_signals WHERE rule_id=? AND event_id=?",
+        (rule_id, event_id),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def sh_insert_signal(sig: dict) -> int | None:
+    """UNIQUE(rule_id, event_id) защищает от повторного сигнала по правилу на матч."""
+    conn = _conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO sh_strat_signals
+                (rule_id, event_id, league, team1, team2, rule_minute, fired_minute,
+                 outcome, odds, kf_min, kf_max, score1, score2,
+                 chat_id, message_id, status, result, final_score, created_at)
+            VALUES
+                (:rule_id, :event_id, :league, :team1, :team2, :rule_minute, :fired_minute,
+                 :outcome, :odds, :kf_min, :kf_max, :score1, :score2,
+                 :chat_id, :message_id, :status, :result, :final_score, :created_at)
+        """, sig)
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+    finally:
+        conn.close()
+
+
+def sh_get_signals_for_event(event_id: int) -> list[dict]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM sh_strat_signals WHERE event_id=?", (event_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def sh_update_signal_result(signal_id: int, result: str | None, final_score: str):
+    conn = _conn()
+    conn.execute(
+        "UPDATE sh_strat_signals SET result=?, final_score=? WHERE id=?",
+        (result, final_score, signal_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def sh_rule_stats(rule_id: int) -> dict:
+    """Статистика по правилу: отправлено сигналов, побед/поражений."""
+    conn = _conn()
+    base = "FROM sh_strat_signals WHERE rule_id=? AND status='sent'"
+    total  = conn.execute(f"SELECT COUNT(*) {base}", (rule_id,)).fetchone()[0]
+    wins   = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", (rule_id,)).fetchone()[0]
+    losses = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", (rule_id,)).fetchone()[0]
+    no_res = conn.execute(f"SELECT COUNT(*) {base} AND result IS NULL", (rule_id,)).fetchone()[0]
+    conn.close()
+    settled = wins + losses
+    winrate = (wins / settled * 100) if settled else 0.0
+    return {"signals": total, "wins": wins, "losses": losses,
+            "no_result": no_res, "winrate": winrate}
+
+
+def sh_clear_signals():
+    conn = _conn()
+    conn.execute("DELETE FROM sh_strat_signals")
+    conn.commit()
+    conn.close()

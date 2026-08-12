@@ -24,9 +24,11 @@ import export_prime
 import export_periods
 import export_signals
 import sh_collector_db
+import sh_signals
 import export_shorthockey
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
-                    COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES)
+                    COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES,
+                    SH_STRAT_CODE, SH_STRAT_LEAGUES, sh_short_league)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -181,6 +183,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
         [InlineKeyboardButton("🎯 Стратегия", callback_data="strat")],
+        [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
         [panel_btn],
     ])
 
@@ -591,6 +594,169 @@ def thr_text() -> str:
     return "\n".join(lines)
 
 
+# --- хаб «Стратегия хоккея»: правила по лигам шорт-хоккея -------------------
+
+# приём разных написаний исхода в одну строку
+_OUTCOME_ALIASES = {
+    "1": "win1", "п1": "win1", "p1": "win1", "win1": "win1",
+    "x": "draw", "х": "draw", "0": "draw", "draw": "draw", "ничья": "draw",
+    "2": "win2", "п2": "win2", "p2": "win2", "win2": "win2",
+}
+
+
+def parse_sh_rule_input(raw: str):
+    """'15 X 1.01 2' -> (minute, outcome, kf_min, kf_max) или None при ошибке.
+
+    Порядок: минута, исход (1/X/2 или П1/П2), кф_от, кф_до. Кф с запятой или точкой,
+    границы можно в любом порядке — упорядочим сами."""
+    parts = raw.replace(",", ".").split()
+    if len(parts) != 4:
+        return None
+    try:
+        minute = int(parts[0])
+    except ValueError:
+        return None
+    if minute < 0:
+        return None
+    outcome = _OUTCOME_ALIASES.get(parts[1].lower())
+    if outcome is None:
+        return None
+    try:
+        a, b = float(parts[2]), float(parts[3])
+    except ValueError:
+        return None
+    if a <= 0 or b <= 0:
+        return None
+    kf_min, kf_max = (a, b) if a <= b else (b, a)
+    return minute, outcome, kf_min, kf_max
+
+
+def sh_rule_label(rule: dict) -> str:
+    """Короткая подпись правила для кнопки/списка."""
+    mark = "✅" if rule["enabled"] else "🚫"
+    return (f"{mark} {sh_short_league(rule['sport_name'])} · мин {rule['minute']} · "
+            f"{sh_signals.outcome_label(rule['outcome'])} · "
+            f"{sh_signals.fmt_range(rule['kf_min'], rule['kf_max'])}")
+
+
+def shstrat_kb() -> InlineKeyboardMarkup:
+    toggle = (InlineKeyboardButton("⏹ Остановить сборщик", callback_data="sh_stop")
+              if sh_parser_running() else
+              InlineKeyboardButton("▶️ Запустить сборщик", callback_data="sh_start"))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Правила / лиги", callback_data="shrules")],
+        [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="shchat")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="shstats")],
+        [toggle],
+        [InlineKeyboardButton("🗑 Сбросить БД сигналов", callback_data="shreset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def shstrat_text() -> str:
+    cid = database.get_chat_id(SH_STRAT_CODE)
+    rules = database.sh_get_rules()
+    on = sum(1 for r in rules if r["enabled"])
+    return (
+        "🏒 <b>Стратегия шорт-хоккея</b>\n"
+        f"Сборщик: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}\n"
+        f"Чат отправки: {'<code>' + str(cid) + '</code>' if cid is not None else '❗️ не задан'}\n"
+        f"Правил: {len(rules)} (включено {on})\n\n"
+        "Бот ищет сигналы ТОЛЬКО по настроенным лигам: на заданной минуте матча "
+        "проверяет кф выбранного исхода (П1/X/П2) и, если он в диапазоне, шлёт сигнал.\n"
+        "⚠️ Сбор данных должен быть запущен (сборщик шорт-хоккея)."
+    )
+
+
+def shrules_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(sh_rule_label(r), callback_data=f"shrule:{r['id']}")]
+            for r in database.sh_get_rules()]
+    rows.append([InlineKeyboardButton("➕ Добавить лигу", callback_data="shadd")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="shstrat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def shrules_text() -> str:
+    rules = database.sh_get_rules()
+    lines = ["📋 <b>Правила стратегии</b>", ""]
+    if not rules:
+        lines.append("Пока пусто. Нажми «➕ Добавить лигу».")
+    else:
+        lines.append("Тап по правилу — открыть/изменить/удалить.")
+    return "\n".join(lines)
+
+
+def shadd_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(sh_short_league(name), callback_data=f"shaddlg:{i}")]
+            for i, name in enumerate(SH_STRAT_LEAGUES)]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="shrules")])
+    return InlineKeyboardMarkup(rows)
+
+
+def shrule_kb(rule_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    toggle = ("🚫 Выключить" if enabled else "✅ Включить")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle, callback_data=f"shtgl:{rule_id}")],
+        [InlineKeyboardButton("✏️ Изменить параметры", callback_data=f"shedit:{rule_id}")],
+        [InlineKeyboardButton("🗑 Удалить правило", callback_data=f"shdel_ask:{rule_id}")],
+        [InlineKeyboardButton("⬅️ К правилам", callback_data="shrules")],
+    ])
+
+
+def shrule_text(rule: dict) -> str:
+    st = database.sh_rule_stats(rule["id"])
+    lines = [
+        f"🏒 <b>{sh_short_league(rule['sport_name'])}</b>",
+        f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
+        "",
+        f"⏱ Минута сигнала: <b>{rule['minute']}</b>",
+        f"🎯 Ставка: <b>{sh_signals.outcome_label(rule['outcome'])}</b>",
+        f"📐 Диапазон кф: <b>{sh_signals.fmt_range(rule['kf_min'], rule['kf_max'])}</b>",
+        "",
+        "<b>Статистика</b>",
+        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | ⏸️ {st['no_result']}",
+    ]
+    if st["wins"] + st["losses"] > 0:
+        lines.append(f"Винрейт: {st['winrate']:.0f}%")
+    return "\n".join(lines)
+
+
+def confirm_shdel_kb(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"shdel_yes:{rule_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"shrule:{rule_id}"),
+    ]])
+
+
+def confirm_shreset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="shreset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="shstrat"),
+    ]])
+
+
+def shstats_text() -> str:
+    rules = database.sh_get_rules()
+    lines = ["📊 <b>Статистика стратегии хоккея</b>", ""]
+    if not rules:
+        lines.append("Правил ещё нет.")
+        return "\n".join(lines)
+    tot_s = tot_w = tot_l = 0
+    for r in rules:
+        st = database.sh_rule_stats(r["id"])
+        tot_s += st["signals"]; tot_w += st["wins"]; tot_l += st["losses"]
+        lines.append(f"🏒 <b>{sh_short_league(r['sport_name'])}</b> "
+                     f"(мин {r['minute']} · {sh_signals.outcome_label(r['outcome'])} · "
+                     f"{sh_signals.fmt_range(r['kf_min'], r['kf_max'])})")
+        wr = f" · WR {st['winrate']:.0f}%" if (st['wins'] + st['losses']) else ""
+        lines.append(f"   Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | ⏸️ {st['no_result']}{wr}")
+    settled = tot_w + tot_l
+    wr = (tot_w / settled * 100) if settled else 0.0
+    lines += ["", f"<b>ИТОГО:</b> сигналов {tot_s} | ✅ {tot_w} | ❌ {tot_l}"
+              + (f" | Винрейт {wr:.0f}%" if settled else "")]
+    return "\n".join(lines)
+
+
 # --- handlers --------------------------------------------------------------
 
 def _authorized(update: Update) -> bool:
@@ -944,6 +1110,126 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ БД стратегий очищена.\n\n" + strategy_text(),
                                   parse_mode="HTML", reply_markup=strategy_kb())
 
+    # --- стратегия хоккея ---------------------------------------------------
+    elif data == "shstrat":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(shstrat_text(), parse_mode="HTML", reply_markup=shstrat_kb())
+
+    elif data == "shrules":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(shrules_text(), parse_mode="HTML", reply_markup=shrules_kb())
+
+    elif data == "shadd":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(
+            "➕ <b>Добавить лигу</b>\nВыбери лигу шорт-хоккея:",
+            parse_mode="HTML", reply_markup=shadd_kb())
+
+    elif data.startswith("shaddlg:"):
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not (0 <= idx < len(SH_STRAT_LEAGUES)):
+            return
+        ctx.user_data["await"] = ("shrule_new", idx)
+        name = sh_short_league(SH_STRAT_LEAGUES[idx])
+        await q.edit_message_text(
+            f"🏒 <b>{name}</b>\n\n"
+            "Пришли параметры <b>одной строкой</b>:\n"
+            "<code>минута исход кф_от кф_до</code>\n\n"
+            "Исход: <code>1</code> (П1), <code>X</code> (ничья), <code>2</code> (П2).\n"
+            "Пример: <code>15 X 1.01 2</code>\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data.startswith("shrule:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.sh_get_rule(rid)
+        if not rule:
+            await q.edit_message_text(shrules_text(), parse_mode="HTML", reply_markup=shrules_kb())
+            return
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(shrule_text(rule), parse_mode="HTML",
+                                  reply_markup=shrule_kb(rid, bool(rule["enabled"])))
+
+    elif data.startswith("shtgl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        database.sh_toggle_rule(rid)
+        rule = database.sh_get_rule(rid)
+        if not rule:
+            await q.edit_message_text(shrules_text(), parse_mode="HTML", reply_markup=shrules_kb())
+            return
+        await q.edit_message_text(shrule_text(rule), parse_mode="HTML",
+                                  reply_markup=shrule_kb(rid, bool(rule["enabled"])))
+
+    elif data.startswith("shedit:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.sh_get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("shrule_edit", rid)
+        await q.edit_message_text(
+            f"✏️ <b>Изменить · {sh_short_league(rule['sport_name'])}</b>\n"
+            f"Сейчас: мин {rule['minute']} · {sh_signals.outcome_label(rule['outcome'])} · "
+            f"{sh_signals.fmt_range(rule['kf_min'], rule['kf_max'])}\n\n"
+            "Пришли новые параметры одной строкой:\n"
+            "<code>минута исход кф_от кф_до</code>\n"
+            "Пример: <code>20 1 1.5 2.3</code>\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data.startswith("shdel_ask:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.sh_get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить правило?</b>\n{sh_rule_label(rule)}\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_shdel_kb(rid))
+
+    elif data.startswith("shdel_yes:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        database.sh_delete_rule(rid)
+        await q.edit_message_text("✅ Правило удалено.\n\n" + shrules_text(),
+                                  parse_mode="HTML", reply_markup=shrules_kb())
+
+    elif data == "shchat":
+        ctx.user_data["await"] = ("shchat", None)
+        cid = database.get_chat_id(SH_STRAT_CODE)
+        await q.edit_message_text(
+            "⚙️ <b>Чат стратегии хоккея</b>\n"
+            f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
+            "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "shstats":
+        await q.edit_message_text(shstats_text(), parse_mode="HTML", reply_markup=shstrat_kb())
+
+    elif data == "shreset_ask":
+        await q.edit_message_text(
+            "⚠️ <b>Удалить все сигналы стратегии хоккея?</b>\n"
+            "Правила лиг и собранные рынки не затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_shreset_kb())
+
+    elif data == "shreset_yes":
+        database.sh_clear_signals()
+        await q.edit_message_text("✅ Сигналы стратегии хоккея очищены.\n\n" + shstrat_text(),
+                                  parse_mode="HTML", reply_markup=shstrat_kb())
+
     elif data == "back":
         ctx.user_data.pop("await", None)
         await q.edit_message_text(panel_text(), parse_mode="HTML", reply_markup=main_kb())
@@ -997,6 +1283,57 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ {STRATEGIES.get(code, code)} → {signals.fmt_windows(code)}.",
             parse_mode="HTML", reply_markup=main_kb())
+
+    elif kind == "shchat":
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_chat_id(SH_STRAT_CODE, cid)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Стратегия хоккея → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=shstrat_kb())
+
+    elif kind == "shrule_new":
+        parsed = parse_sh_rule_input(raw)
+        if not parsed:
+            await update.message.reply_text(
+                "❌ Формат: <code>минута исход кф_от кф_до</code>, например "
+                "<code>15 X 1.01 2</code>. Ещё раз или /start.", parse_mode="HTML")
+            return
+        idx = code                                   # code здесь = индекс лиги
+        minute, outcome, kf_min, kf_max = parsed
+        if not (0 <= idx < len(SH_STRAT_LEAGUES)):
+            ctx.user_data.pop("await", None)
+            return
+        database.sh_add_rule(SH_STRAT_LEAGUES[idx], minute, outcome, kf_min, kf_max)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Правило добавлено:\n<b>{sh_short_league(SH_STRAT_LEAGUES[idx])}</b> · "
+            f"мин {minute} · {sh_signals.outcome_label(outcome)} · "
+            f"{sh_signals.fmt_range(kf_min, kf_max)}",
+            parse_mode="HTML", reply_markup=shrules_kb())
+
+    elif kind == "shrule_edit":
+        parsed = parse_sh_rule_input(raw)
+        if not parsed:
+            await update.message.reply_text(
+                "❌ Формат: <code>минута исход кф_от кф_до</code>, например "
+                "<code>15 X 1.01 2</code>. Ещё раз или /start.", parse_mode="HTML")
+            return
+        rid = code                                   # code здесь = id правила
+        minute, outcome, kf_min, kf_max = parsed
+        database.sh_update_rule(rid, minute, outcome, kf_min, kf_max)
+        ctx.user_data.pop("await", None)
+        rule = database.sh_get_rule(rid)
+        if rule:
+            await update.message.reply_text(
+                "✅ Правило изменено.\n\n" + shrule_text(rule), parse_mode="HTML",
+                reply_markup=shrule_kb(rid, bool(rule["enabled"])))
+        else:
+            await update.message.reply_text("✅ Готово.", reply_markup=shrules_kb())
 
 
 def _valid_hhmm(s: str) -> bool:
