@@ -377,6 +377,40 @@ def stats_text() -> str:
             if ls["wins"] + ls["losses"] > 0:
                 lines.append(f"🎯 Винрейт: {ls['winrate']:.0f}% | ROI: {ls['roi']:+.1f}%")
                 lines.append(f"💰 Прибыль: {money(ls['profit'])}")
+    lines.append(sh_stats_section())
+    return "\n".join(lines)
+
+
+def sh_stats_section() -> str:
+    """Блок статистики стратегии хоккея для общего экрана «Статистика стратегий»."""
+    rules = database.sh_get_rules()
+    lines = ["", "", "🏒 <b>СТРАТЕГИЯ ХОККЕЯ</b>", ""]
+    if not rules:
+        lines.append("Правил ещё нет — добавь в «🏒 Стратегия хоккея».")
+        return "\n".join(lines)
+    tot = database.sh_overall_stats()
+    lines.append("<b>Общая статистика</b>")
+    lines.append(f"📌 Сигналов: {tot['signals']}")
+    lines.append(f"✅ Плюсовые: {tot['wins']} | ❌ Минусовые: {tot['losses']} | ⏸️ Без итога: {tot['no_result']}")
+    if tot["wins"] + tot["losses"] > 0:
+        bal = f"{tot['balance']:,.0f}".replace(",", " ")
+        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}%")
+        lines.append(f"🧮 ROI: {tot['roi']:+.1f}%")
+        lines.append(f"💰 Прибыль: {money(tot['profit'])}")
+        lines.append(f"🏦 Баланс: {bal}₽")
+    # разбивка по правилам (лигам)
+    for r in rules:
+        st = database.sh_rule_stats(r["id"])
+        if st["signals"] == 0:
+            continue
+        lines += ["", f"🏒 <b>{sh_short_league(r['sport_name'])}</b> "
+                  f"(мин {r['minute']} · {sh_signals.outcome_label(r['outcome'])} · "
+                  f"{sh_signals.fmt_range(r['kf_min'], r['kf_max'])})"]
+        lines.append(f"📌 Сигналов: {st['signals']}")
+        lines.append(f"✅ {st['wins']} | ❌ {st['losses']} | ⏸️ {st['no_result']}")
+        if st["wins"] + st["losses"] > 0:
+            lines.append(f"🎯 Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+            lines.append(f"💰 Прибыль: {money(st['profit'])}")
     return "\n".join(lines)
 
 
@@ -717,7 +751,8 @@ def shrule_text(rule: dict) -> str:
         f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | ⏸️ {st['no_result']}",
     ]
     if st["wins"] + st["losses"] > 0:
-        lines.append(f"Винрейт: {st['winrate']:.0f}%")
+        lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+        lines.append(f"Прибыль: {money(st['profit'])}")
     return "\n".join(lines)
 
 
@@ -741,19 +776,21 @@ def shstats_text() -> str:
     if not rules:
         lines.append("Правил ещё нет.")
         return "\n".join(lines)
-    tot_s = tot_w = tot_l = 0
     for r in rules:
         st = database.sh_rule_stats(r["id"])
-        tot_s += st["signals"]; tot_w += st["wins"]; tot_l += st["losses"]
         lines.append(f"🏒 <b>{sh_short_league(r['sport_name'])}</b> "
                      f"(мин {r['minute']} · {sh_signals.outcome_label(r['outcome'])} · "
                      f"{sh_signals.fmt_range(r['kf_min'], r['kf_max'])})")
-        wr = f" · WR {st['winrate']:.0f}%" if (st['wins'] + st['losses']) else ""
-        lines.append(f"   Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | ⏸️ {st['no_result']}{wr}")
-    settled = tot_w + tot_l
-    wr = (tot_w / settled * 100) if settled else 0.0
-    lines += ["", f"<b>ИТОГО:</b> сигналов {tot_s} | ✅ {tot_w} | ❌ {tot_l}"
-              + (f" | Винрейт {wr:.0f}%" if settled else "")]
+        extra = ""
+        if st['wins'] + st['losses']:
+            extra = f" · WR {st['winrate']:.0f}% · {money(st['profit'])}"
+        lines.append(f"   Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | ⏸️ {st['no_result']}{extra}")
+    tot = database.sh_overall_stats()
+    settled = tot["wins"] + tot["losses"]
+    line = f"<b>ИТОГО:</b> сигналов {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']}"
+    if settled:
+        line += f" | Винрейт {tot['winrate']:.0f}% | ROI {tot['roi']:+.1f}% | {money(tot['profit'])}"
+    lines += ["", line]
     return "\n".join(lines)
 
 

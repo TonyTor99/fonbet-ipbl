@@ -607,18 +607,44 @@ def sh_update_signal_result(signal_id: int, result: str | None, final_score: str
 
 
 def sh_rule_stats(rule_id: int) -> dict:
-    """Статистика по правилу: отправлено сигналов, побед/поражений."""
+    """Статистика по правилу: отправлено сигналов, побед/поражений, прибыль/ROI.
+    Прибыль виртуальная — как у баскетбольных стратегий: ставка STAKE на каждый
+    сигнал, выигрыш = STAKE*(кф−1), проигрыш = −STAKE. Считаем только реально
+    отправленные (status='sent')."""
     conn = _conn()
     base = "FROM sh_strat_signals WHERE rule_id=? AND status='sent'"
     total  = conn.execute(f"SELECT COUNT(*) {base}", (rule_id,)).fetchone()[0]
     wins   = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", (rule_id,)).fetchone()[0]
     losses = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", (rule_id,)).fetchone()[0]
     no_res = conn.execute(f"SELECT COUNT(*) {base} AND result IS NULL", (rule_id,)).fetchone()[0]
+    sum_win_odds = conn.execute(
+        f"SELECT COALESCE(SUM(odds), 0) {base} AND result='Выигрыш'", (rule_id,)).fetchone()[0]
     conn.close()
     settled = wins + losses
     winrate = (wins / settled * 100) if settled else 0.0
+    # STAKE*(кф−1) по выигрышам − STAKE по проигрышам = STAKE*(Σкф_побед − wins − losses)
+    profit = STAKE * (sum_win_odds - wins - losses)
+    staked = settled * STAKE
+    roi = (profit / staked * 100) if staked else 0.0
     return {"signals": total, "wins": wins, "losses": losses,
-            "no_result": no_res, "winrate": winrate}
+            "no_result": no_res, "winrate": winrate,
+            "profit": profit, "staked": staked, "roi": roi}
+
+
+def sh_overall_stats() -> dict:
+    """Свод по всей стратегии хоккея (сумма по правилам)."""
+    tot = {"signals": 0, "wins": 0, "losses": 0, "no_result": 0,
+           "profit": 0.0, "staked": 0.0}
+    for r in sh_get_rules():
+        st = sh_rule_stats(r["id"])
+        tot["signals"] += st["signals"]; tot["wins"] += st["wins"]
+        tot["losses"] += st["losses"]; tot["no_result"] += st["no_result"]
+        tot["profit"] += st["profit"]; tot["staked"] += st["staked"]
+    settled = tot["wins"] + tot["losses"]
+    tot["winrate"] = (tot["wins"] / settled * 100) if settled else 0.0
+    tot["roi"] = (tot["profit"] / tot["staked"] * 100) if tot["staked"] else 0.0
+    tot["balance"] = BANKROLL_START + tot["profit"]
+    return tot
 
 
 def sh_clear_signals():
