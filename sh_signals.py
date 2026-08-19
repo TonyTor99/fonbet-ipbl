@@ -77,6 +77,8 @@ def render_signal(sig: dict) -> str:
     ]
     if sig.get("final_score"):
         lines.append(f"🏁 <b>Итог: {html.escape(str(sig['final_score']))}</b>")
+        if sig.get("shootout"):
+            lines.append("🔸 <i>серия буллитов — расчёт по осн. времени</i>")
         if sig.get("result") == "Выигрыш":
             lines.append("✅ <b>Выигрыш</b>")
         elif sig.get("result") == "Проигрыш":
@@ -158,9 +160,13 @@ def _fire(rule: dict, state: dict, odds: float):
                  odds, state["score1"], state["score2"], chat_id)
 
 
-def resolve(event_id: int, s1: int, s2: int):
-    """Дорасчёт итога сигналов стратегии и редактирование сообщений."""
+def resolve(event_id: int, s1: int, s2: int, displayed=None):
+    """Дорасчёт итога сигналов стратегии по ОСНОВНОМУ времени и правка сообщений.
+
+    s1:s2 — счёт основного времени (без буллитов/ОТ). displayed — общий счёт с
+    буллитом (если был): при расхождении помечаем сигнал как решённый серией."""
     final_score = f"{s1}:{s2}"
+    shootout = displayed is not None and tuple(displayed) != (s1, s2)
     try:
         for sig in database.sh_get_signals_for_event(event_id):
             if sig["result"] is not None:
@@ -170,7 +176,7 @@ def resolve(event_id: int, s1: int, s2: int):
             database.sh_update_signal_result(sig["id"], result, final_score)
             if sig["status"] == "sent" and sig["message_id"] and sig["chat_id"] is not None:
                 s2d = dict(sig)
-                s2d.update(result=result, final_score=final_score)
+                s2d.update(result=result, final_score=final_score, shootout=shootout)
                 tg_notify.edit(sig["chat_id"], sig["message_id"], render_signal(s2d))
     except Exception as e:
         log.warning("resolve err ev=%s: %s", event_id, e)

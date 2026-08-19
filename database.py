@@ -119,6 +119,49 @@ def init_db():
         CREATE UNIQUE INDEX IF NOT EXISTS idx_shsig_unique ON sh_strat_signals(rule_id, event_id);
         CREATE INDEX IF NOT EXISTS idx_shsig_event ON sh_strat_signals(event_id);
 
+        -- Отдельная стратегия шорт-хоккея на ТОТАЛАХ. Одно правило = лига + минута
+        -- (строго ==) + сторона (over/under) + диапазон ЛИНИИ тотала [line_min,
+        -- line_max]. Срабатывание: на заданной минуте линия тотала матча попала в
+        -- диапазон — шлём сигнал по выбранной стороне (кф берётся какой есть).
+        CREATE TABLE IF NOT EXISTS sh_total_rules (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            sport_name TEXT NOT NULL,               -- ПОЛНОЕ название лиги
+            minute     INTEGER NOT NULL,            -- игровая минута сигнала (строго ==)
+            side       TEXT NOT NULL,               -- 'over' (ТБ) | 'under' (ТМ)
+            line_min   REAL NOT NULL,               -- нижняя граница линии тотала
+            line_max   REAL NOT NULL,               -- верхняя граница линии тотала
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+
+        -- Отправленные сигналы стратегии тоталов (дедуп по rule_id+event_id).
+        CREATE TABLE IF NOT EXISTS sh_total_signals (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id      INTEGER NOT NULL,
+            event_id     INTEGER NOT NULL,
+            league       TEXT NOT NULL,
+            team1        TEXT NOT NULL,
+            team2        TEXT NOT NULL,
+            rule_minute  INTEGER NOT NULL,          -- минута из правила
+            fired_minute INTEGER NOT NULL,          -- фактическая игровая минута срабатывания
+            side         TEXT NOT NULL,             -- over / under
+            line         REAL,                      -- линия тотала на момент сигнала
+            odds         REAL,                      -- кф стороны на момент сигнала
+            line_min     REAL NOT NULL,
+            line_max     REAL NOT NULL,
+            score1       INTEGER NOT NULL,
+            score2       INTEGER NOT NULL,
+            chat_id      INTEGER,
+            message_id   INTEGER,
+            status       TEXT NOT NULL,             -- sent / no_chat
+            result       TEXT,                      -- Выигрыш / Проигрыш / Возврат / NULL
+            final_score  TEXT,
+            final_total  INTEGER,
+            created_at   TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_shtot_unique ON sh_total_signals(rule_id, event_id);
+        CREATE INDEX IF NOT EXISTS idx_shtot_event ON sh_total_signals(event_id);
+
         CREATE TABLE IF NOT EXISTS report_state (
             kind       TEXT PRIMARY KEY,            -- 'weekly' | 'monthly'
             marker     TEXT,                        -- за какой период уже отправлен ('YYYY-MM-DD' понедельника / 'YYYY-MM')
@@ -650,5 +693,166 @@ def sh_overall_stats() -> dict:
 def sh_clear_signals():
     conn = _conn()
     conn.execute("DELETE FROM sh_strat_signals")
+    conn.commit()
+    conn.close()
+
+
+# ===========================================================================
+# Стратегия ТОТАЛОВ шорт-хоккея (ТБ/ТМ). Отдельные правила/сигналы/статистика.
+# ===========================================================================
+
+def sh_total_get_rules() -> list[dict]:
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM sh_total_rules ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def sh_total_get_rule(rule_id: int) -> dict | None:
+    conn = _conn()
+    row = conn.execute("SELECT * FROM sh_total_rules WHERE id=?", (rule_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def sh_total_add_rule(sport_name: str, minute: int, side: str,
+                      line_min: float, line_max: float) -> int:
+    conn = _conn()
+    cur = conn.execute(
+        "INSERT INTO sh_total_rules (sport_name, minute, side, line_min, line_max, enabled, created_at) "
+        "VALUES (?, ?, ?, ?, ?, 1, ?)",
+        (sport_name, int(minute), side, float(line_min), float(line_max),
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def sh_total_update_rule(rule_id: int, minute: int, side: str,
+                         line_min: float, line_max: float):
+    conn = _conn()
+    conn.execute(
+        "UPDATE sh_total_rules SET minute=?, side=?, line_min=?, line_max=? WHERE id=?",
+        (int(minute), side, float(line_min), float(line_max), rule_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def sh_total_delete_rule(rule_id: int):
+    conn = _conn()
+    conn.execute("DELETE FROM sh_total_rules WHERE id=?", (rule_id,))
+    conn.commit()
+    conn.close()
+
+
+def sh_total_toggle_rule(rule_id: int) -> bool:
+    conn = _conn()
+    row = conn.execute("SELECT enabled FROM sh_total_rules WHERE id=?", (rule_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return False
+    new_state = 0 if row["enabled"] else 1
+    conn.execute("UPDATE sh_total_rules SET enabled=? WHERE id=?", (new_state, rule_id))
+    conn.commit()
+    conn.close()
+    return bool(new_state)
+
+
+def sh_total_signal_exists(rule_id: int, event_id: int) -> bool:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM sh_total_signals WHERE rule_id=? AND event_id=?",
+        (rule_id, event_id),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def sh_total_insert_signal(sig: dict) -> int | None:
+    conn = _conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO sh_total_signals
+                (rule_id, event_id, league, team1, team2, rule_minute, fired_minute,
+                 side, line, odds, line_min, line_max, score1, score2,
+                 chat_id, message_id, status, result, final_score, final_total, created_at)
+            VALUES
+                (:rule_id, :event_id, :league, :team1, :team2, :rule_minute, :fired_minute,
+                 :side, :line, :odds, :line_min, :line_max, :score1, :score2,
+                 :chat_id, :message_id, :status, :result, :final_score, :final_total, :created_at)
+        """, sig)
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+    finally:
+        conn.close()
+
+
+def sh_total_get_signals_for_event(event_id: int) -> list[dict]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM sh_total_signals WHERE event_id=?", (event_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def sh_total_update_signal_result(signal_id: int, result: str | None,
+                                  final_score: str, final_total: int):
+    conn = _conn()
+    conn.execute(
+        "UPDATE sh_total_signals SET result=?, final_score=?, final_total=? WHERE id=?",
+        (result, final_score, final_total, signal_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def sh_total_rule_stats(rule_id: int) -> dict:
+    """Как sh_rule_stats, но с учётом Возврата (пуш на целой линии): возврат не
+    считается в staked и в прибыль (ставка вернулась)."""
+    conn = _conn()
+    base = "FROM sh_total_signals WHERE rule_id=? AND status='sent'"
+    total   = conn.execute(f"SELECT COUNT(*) {base}", (rule_id,)).fetchone()[0]
+    wins    = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", (rule_id,)).fetchone()[0]
+    losses  = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", (rule_id,)).fetchone()[0]
+    pushes  = conn.execute(f"SELECT COUNT(*) {base} AND result='Возврат'", (rule_id,)).fetchone()[0]
+    no_res  = conn.execute(f"SELECT COUNT(*) {base} AND result IS NULL", (rule_id,)).fetchone()[0]
+    sum_win_odds = conn.execute(
+        f"SELECT COALESCE(SUM(odds), 0) {base} AND result='Выигрыш'", (rule_id,)).fetchone()[0]
+    conn.close()
+    settled = wins + losses
+    winrate = (wins / settled * 100) if settled else 0.0
+    profit = STAKE * (sum_win_odds - wins - losses)
+    staked = settled * STAKE
+    roi = (profit / staked * 100) if staked else 0.0
+    return {"signals": total, "wins": wins, "losses": losses, "pushes": pushes,
+            "no_result": no_res, "winrate": winrate,
+            "profit": profit, "staked": staked, "roi": roi}
+
+
+def sh_total_overall_stats() -> dict:
+    tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+           "profit": 0.0, "staked": 0.0}
+    for r in sh_total_get_rules():
+        st = sh_total_rule_stats(r["id"])
+        tot["signals"] += st["signals"]; tot["wins"] += st["wins"]
+        tot["losses"] += st["losses"]; tot["pushes"] += st["pushes"]
+        tot["no_result"] += st["no_result"]
+        tot["profit"] += st["profit"]; tot["staked"] += st["staked"]
+    settled = tot["wins"] + tot["losses"]
+    tot["winrate"] = (tot["wins"] / settled * 100) if settled else 0.0
+    tot["roi"] = (tot["profit"] / tot["staked"] * 100) if tot["staked"] else 0.0
+    tot["balance"] = BANKROLL_START + tot["profit"]
+    return tot
+
+
+def sh_total_clear_signals():
+    conn = _conn()
+    conn.execute("DELETE FROM sh_total_signals")
     conn.commit()
     conn.close()

@@ -21,6 +21,7 @@ import requests
 
 import sh_collector_db as db
 import sh_signals
+import sh_total_signals
 from config import LINE_SERVERS, HEADERS, SCOPE_MARKET, POLL_INTERVAL, MAX_WORKERS
 from sh_config import (LEAGUE_PREFIX, PREMATCH_MINUTE, PREMATCH_COMMENT,
                        WIN1_FID, DRAW_FID, WIN2_FID, DC_1X_FID, DC_12_FID, DC_X2_FID,
@@ -32,6 +33,7 @@ MSK = timezone(timedelta(hours=3))
 
 GRACE_CYCLES = 3
 _SCORE_RE = re.compile(r"(\d+)-(\d+)")
+_FORMAT_RE = re.compile(r"(\d+)x\d+")   # формат лиги "NxM" -> N периодов осн. времени
 
 _session = requests.Session()
 _session.headers.update(HEADERS)
@@ -43,6 +45,7 @@ _last_comment: dict[int, str] = {}
 _miss: dict[int, int] = {}            # циклов отсутствия
 _last_minute: dict[int, int] = {}     # дедуп игровой минуты
 _prematch_done: set[int] = set()      # для каких событий предматч уже записан
+_last_reg_score: dict[int, tuple] = {}  # счёт ОСНОВНОГО времени (без буллитов/ОТ)
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +186,57 @@ def parse_periods(comment: str) -> list[tuple[int, int]]:
     if not mt:
         return []
     return [(int(a), int(b)) for a, b in _SCORE_RE.findall(mt.group(1))]
+
+
+def reg_periods_count(league: str) -> int:
+    """Число периодов основного времени из формата лиги 'NxM' (напр. 3x7 -> 3).
+
+    Берём ПОСЛЕДНИЙ токен NxM: в названиях вида 'Шорт-хоккей. 2x2. MNHL 3x5'
+    формат матча — именно правый ('3x5'), а '2x2' лишь часть имени лиги."""
+    m = _FORMAT_RE.findall(league or "")
+    return int(m[-1]) if m else 3
+
+
+def regulation_from_scores(lei: Optional[dict],
+                           max_periods: Optional[int] = None) -> Optional[tuple[int, int]]:
+    """Счёт основного времени = сумма слотов title='период' в liveEventInfos.scores.
+
+    Серия буллитов/овертайм идёт отдельным слотом (или только в общий счёт) и в
+    сумму периодов НЕ попадает — проверено на живом API шорт-хоккея (авг. 2026).
+    max_periods (N по формату лиги) страхует от лишнего слота: считаем ≤N периодов."""
+    if not lei:
+        return None
+    scores = lei.get("scores")
+    if not scores or len(scores) < 2 or not scores[1]:
+        return None
+    t1 = t2 = 0
+    n = 0
+    for e in scores[1]:
+        if e.get("title") != "период":
+            continue
+        if max_periods is not None and n >= max_periods:
+            break
+        try:
+            t1 += int(e.get("c1"))
+            t2 += int(e.get("c2"))
+        except (TypeError, ValueError):
+            return None
+        n += 1
+    return (t1, t2) if n else None
+
+
+def regulation_from_comment(comment: str, league: str) -> Optional[tuple[int, int]]:
+    """Фоллбэк: счёт осн. времени = сумма ПЕРВЫХ N периодов из comment 'ИТОГ (...)'.
+
+    На финале comment вида 'ИТОГ (1-1 1-2 3-3 0-0)': последний слот — ОТ/буллиты,
+    поэтому берём только первые N (N = reg_periods_count по формату лиги)."""
+    ps = parse_periods(comment)
+    if not ps:
+        return None
+    reg = ps[:reg_periods_count(league)]
+    if not reg:
+        return None
+    return (sum(a for a, _ in reg), sum(b for _, b in reg))
 
 
 def is_prematch(comment: str) -> bool:
@@ -334,12 +388,22 @@ def resolve(event_id: int, s1: int, s2: int):
 # ---------------------------------------------------------------------------
 
 def _finalize(eid: int, comment: str = ""):
-    s1, s2 = _last_score.get(eid, (0, 0))
+    disp = _last_score.get(eid, (0, 0))          # общий счёт (может включать буллит)
+    league = _known.get(eid, {}).get("league", "")
+    # Итог по ОСНОВНОМУ времени: буллиты/ОТ отбрасываем.
+    reg = _last_reg_score.get(eid)
+    if reg is None:
+        reg = regulation_from_comment(comment or _last_comment.get(eid, ""), league)
+    if reg is None:
+        reg = disp
+    s1, s2 = reg
     resolve(eid, s1, s2)
-    sh_signals.resolve(eid, s1, s2)      # дорасчёт сигналов стратегии
+    sh_signals.resolve(eid, s1, s2, displayed=disp)   # дорасчёт сигналов стратегии 1X2
+    sh_total_signals.resolve(eid, s1, s2, displayed=disp)   # дорасчёт сигналов тоталов
     _known.pop(eid, None)
     _last_score.pop(eid, None)
     _last_comment.pop(eid, None)
+    _last_reg_score.pop(eid, None)
     _miss.pop(eid, None)
 
 
@@ -405,6 +469,11 @@ def run_cycle() -> list[dict]:
         ts = int(ts or 0)
         _last_score[eid] = (s1, s2)
         _last_comment[eid] = comment
+        reg = regulation_from_scores(lei, reg_periods_count(meta["league"]))
+        if reg is None:
+            reg = regulation_from_comment(comment, meta["league"])
+        if reg is not None:
+            _last_reg_score[eid] = reg
 
         prematch = is_prematch(comment)
         periods = parse_periods(comment)
@@ -423,7 +492,9 @@ def run_cycle() -> list[dict]:
         try:
             factors = _root_factors(api_data, eid)
             if factors:
-                sh_signals.process_match(state, extract_markets(factors))
+                mk = extract_markets(factors)
+                sh_signals.process_match(state, mk)
+                sh_total_signals.process_match(state, mk)
         except Exception as e:
             log.warning("sh_signal err ev=%s: %s", eid, e)
         results.append(state)
