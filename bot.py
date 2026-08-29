@@ -421,6 +421,18 @@ def stats_sht_text() -> str:
     return _bal_line() + sh_total_stats_section()
 
 
+def _rule_strat_status(rules, chat_code: str, unit: str) -> str:
+    """Статус rule-based стратегии (Prime/хоккей/тоталы) для экрана «Статус».
+    У них нет окон по времени — активность определяется наличием правил и чата."""
+    n = len(rules)
+    cid = database.get_chat_id(chat_code)
+    if n == 0:
+        return f"⚪ нет {unit}"
+    if cid is None:
+        return f"⚠️ {unit} есть ({n}), чат не задан"
+    return f"🟢 активна ({n} {unit})"
+
+
 def prime_stats_section() -> str:
     """Блок статистики Prime-стратегии для общего экрана «Статистика стратегий»."""
     rules = prime_db.get_rules()
@@ -1428,9 +1440,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  "",
                  f"Активных сигналов (ждут итога): {active}",
                  "",
-                 "<b>Окна работы стратегий</b>"]
-        for code, name in STRATEGIES.items():
-            lines.append(f"• <b>{name}</b>: {signals.window_status(code)}")
+                 "<b>Стратегии</b>",
+                 f"• 🎯 Стратегия ТМ: {signals.window_status('signal_tm')}",
+                 f"• 🔔 Prime перерыв: {signals.window_status('prime_info')}",
+                 f"• 🏀 Стратегия Prime: "
+                 f"{_rule_strat_status(prime_db.get_rules(), PRIME_STRAT_CODE, 'наборов')}",
+                 f"• 🏒 Стратегия хоккея: "
+                 f"{_rule_strat_status(database.sh_get_rules(), SH_STRAT_CODE, 'правил')}",
+                 f"• 🏒 Стратегия тоталов: "
+                 f"{_rule_strat_status(database.sh_total_get_rules(), SH_TOTAL_STRAT_CODE, 'правил')}"]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
 
     elif data == "stats":
