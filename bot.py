@@ -310,7 +310,7 @@ def sched_kb() -> InlineKeyboardMarkup:
 def stats_kb() -> InlineKeyboardMarkup:
     """Меню статистики: по кнопке на каждую стратегию."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎯 Стратегия ТМ", callback_data="stats_tm")],
+        [InlineKeyboardButton("🏀 Стратегия IPBL", callback_data="stats_tm")],
         [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="stats_prime")],
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="stats_sh")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="stats_sht")],
@@ -376,7 +376,7 @@ def _bal_line() -> str:
 
 def stats_tm_text() -> str:
     """Статистика стратегии «Сигнал ТМ» (+ уведомления Prime-перерыва)."""
-    lines = ["📊 <b>СТАТИСТИКА · СИГНАЛ ТМ</b>", "", _bal_line()]
+    lines = ["📊 <b>СТАТИСТИКА · СТРАТЕГИЯ IPBL</b>", "", _bal_line()]
     for code, name in STRATEGIES.items():
         s = database.bot_stats(code)
         lines += ["", "", f"🤖 <b>{name.upper()}</b>", ""]
@@ -1441,7 +1441,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"Активных сигналов (ждут итога): {active}",
                  "",
                  "<b>Стратегии</b>",
-                 f"• 🎯 Стратегия ТМ: {signals.window_status('signal_tm')}",
+                 f"• 🏀 Стратегия IPBL: {signals.window_status('signal_tm')}",
                  f"• 🔔 Prime перерыв: {signals.window_status('prime_info')}",
                  f"• 🏀 Стратегия Prime: "
                  f"{_rule_strat_status(prime_db.get_rules(), PRIME_STRAT_CODE, 'наборов')}",
