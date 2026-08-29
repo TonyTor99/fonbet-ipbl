@@ -158,10 +158,17 @@ def sh_short_league(name: str) -> str:
 # сигналы пишем в ОТДЕЛЬНЫЙ файл (PRIME_STRAT_DB) — только отправленные сигналы
 # с результатом (зашло/не зашло). Сборщик остаётся чистым.
 # ===========================================================================
-PRIME_STRAT_CODE = "prime_strat"            # код в bot_config для chat_id стратегии
+PRIME_STRAT_CODE = "prime_strat"            # СТАРЫЙ единый код чата (миграция → TM)
 PRIME_STRAT_LEAGUE = 114967                 # sportId Prime муж (источник матчей)
 PRIME_STRAT_SOURCE_DB = "prime_markets.db"  # откуда берём список пар (сборщик Prime муж)
 PRIME_STRAT_DB = "prime_strategy.db"        # отдельный файл сигналов стратегии
 
 # Рынки стратегии: код -> подпись. tm = тотал меньше матча, it1 = инд. тотал К1 меньше.
 PRIME_MARKETS = {"tm": "ТМ", "it1": "ИТМ1"}
+
+# Два НЕЗАВИСИМЫХ варианта Prime — ТМ и ИТМ1 — шлют в РАЗНЫЕ чаты (свои коды в
+# bot_config) и считаются раздельно. БД одна (PRIME_STRAT_DB), разделение по полю
+# market. Excel/статистика/отчёты — по каждому рынку отдельно.
+PRIME_STRAT_CODE_TM = "prime_strat_tm"
+PRIME_STRAT_CODE_IT1 = "prime_strat_it1"
+PRIME_STRAT_CHAT = {"tm": PRIME_STRAT_CODE_TM, "it1": PRIME_STRAT_CODE_IT1}

@@ -101,9 +101,13 @@ def init_db():
     conn.close()
 
 
-def clear_signals():
+def clear_signals(market: str | None = None):
+    """Удаляет отправленные сигналы. market=None — все; иначе только этого рынка."""
     conn = _conn()
-    conn.execute("DELETE FROM prime_signals")
+    if market is None:
+        conn.execute("DELETE FROM prime_signals")
+    else:
+        conn.execute("DELETE FROM prime_signals WHERE market=?", (market,))
     conn.commit()
     conn.close()
 
@@ -159,9 +163,13 @@ def distinct_teams() -> list[str]:
 
 # --- наборы (правила) ------------------------------------------------------
 
-def get_rules() -> list[dict]:
+def get_rules(market: str | None = None) -> list[dict]:
     conn = _conn()
-    rows = conn.execute("SELECT * FROM prime_rules ORDER BY id").fetchall()
+    if market is None:
+        rows = conn.execute("SELECT * FROM prime_rules ORDER BY id").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM prime_rules WHERE market=? ORDER BY id", (market,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -346,10 +354,10 @@ def rule_stats(rule_id: int) -> dict:
             "profit": profit, "staked": staked, "roi": roi}
 
 
-def overall_stats() -> dict:
+def overall_stats(market: str | None = None) -> dict:
     tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
            "profit": 0.0, "staked": 0.0}
-    for r in get_rules():
+    for r in get_rules(market):
         st = rule_stats(r["id"])
         for k in ("signals", "wins", "losses", "pushes", "no_result", "profit", "staked"):
             tot[k] += st[k]
@@ -362,21 +370,43 @@ def overall_stats() -> dict:
 
 # --- прибыль для отчётов (день/неделя/месяц) -------------------------------
 
-def profit_by_day(start: str, end: str) -> dict[str, float]:
+def profit_by_day(start: str, end: str, market: str | None = None) -> dict[str, float]:
     conn = _conn()
-    rows = conn.execute(
-        "SELECT date(created_at) AS d, COALESCE(SUM(profit), 0) AS p "
-        "FROM prime_signals WHERE status='sent' AND profit IS NOT NULL "
-        "AND date(created_at) BETWEEN ? AND ? GROUP BY d", (start, end)).fetchall()
+    q = ("SELECT date(created_at) AS d, COALESCE(SUM(profit), 0) AS p "
+         "FROM prime_signals WHERE status='sent' AND profit IS NOT NULL "
+         "AND date(created_at) BETWEEN ? AND ?")
+    args = [start, end]
+    if market is not None:
+        q += " AND market=?"
+        args.append(market)
+    q += " GROUP BY d"
+    rows = conn.execute(q, args).fetchall()
     conn.close()
     return {r["d"]: r["p"] for r in rows}
 
 
-def profit_total(start: str, end: str) -> float:
+def profit_total(start: str, end: str, market: str | None = None) -> float:
     conn = _conn()
-    v = conn.execute(
-        "SELECT COALESCE(SUM(profit), 0) FROM prime_signals "
-        "WHERE status='sent' AND profit IS NOT NULL AND date(created_at) BETWEEN ? AND ?",
-        (start, end)).fetchone()[0]
+    q = ("SELECT COALESCE(SUM(profit), 0) FROM prime_signals "
+         "WHERE status='sent' AND profit IS NOT NULL AND date(created_at) BETWEEN ? AND ?")
+    args = [start, end]
+    if market is not None:
+        q += " AND market=?"
+        args.append(market)
+    v = conn.execute(q, args).fetchone()[0]
     conn.close()
     return v
+
+
+def signals_for_export(market: str | None = None) -> list[dict]:
+    """Отправленные сигналы стратегии для Excel-выгрузки. market — фильтр по рынку."""
+    conn = _conn()
+    q = "SELECT * FROM prime_signals WHERE status='sent'"
+    args: list = []
+    if market is not None:
+        q += " AND market=?"
+        args.append(market)
+    q += " ORDER BY created_at, id"
+    rows = conn.execute(q, args).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

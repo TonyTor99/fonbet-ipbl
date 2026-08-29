@@ -20,7 +20,7 @@ import collector
 import database
 import prime_db
 import tg_notify
-from config import PRIME_STRAT_CODE, PRIME_MARKETS, STAKE
+from config import PRIME_STRAT_CHAT, PRIME_STRAT_CODE_TM, PRIME_MARKETS, STAKE
 
 log = logging.getLogger("prime_signals")
 MSK = timezone(timedelta(hours=3))
@@ -123,7 +123,9 @@ def process_match(state: dict, api_data):
 
 
 def _fire(rule: dict, state: dict, line: float, odds: float):
-    chat_id = database.get_chat_id(PRIME_STRAT_CODE)
+    # чат — свой на каждый рынок (ТМ / ИТМ1); БД одна, разделение по market
+    chat_code = PRIME_STRAT_CHAT.get(rule["market"], PRIME_STRAT_CODE_TM)
+    chat_id = database.get_chat_id(chat_code)
     sig = {
         "rule_id": rule["id"],
         "event_id": state["event_id"],
