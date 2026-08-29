@@ -184,9 +184,8 @@ def main_kb() -> InlineKeyboardMarkup:
         [toggle],
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
-        [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
-        [InlineKeyboardButton("🎯 Стратегия", callback_data="strat")],
+        [InlineKeyboardButton("🏀 Стратегия IPBL", callback_data="strat")],
         [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="pmstrat")],
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="shtstrat")],
@@ -272,6 +271,8 @@ def strategy_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Лиги (вкл/выкл)", callback_data="leagues")],
         [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
         [InlineKeyboardButton("⏰ Время работы", callback_data="sched")],
+        [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
+        [InlineKeyboardButton("📥 Выгрузить сигналы (Excel)", callback_data="export_sig")],
         [InlineKeyboardButton("🗑 Сбросить БД стратегий", callback_data="reset_ask")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
@@ -307,17 +308,26 @@ def sched_kb() -> InlineKeyboardMarkup:
 
 
 def stats_kb() -> InlineKeyboardMarkup:
+    """Меню статистики: по кнопке на каждую стратегию."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Выгрузить сигналы (Excel)", callback_data="export_sig")],
+        [InlineKeyboardButton("🎯 Стратегия ТМ", callback_data="stats_tm")],
+        [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="stats_prime")],
+        [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="stats_sh")],
+        [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="stats_sht")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
+
+
+def stats_sub_kb() -> InlineKeyboardMarkup:
+    """Клавиатура экрана статистики отдельной стратегии."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К статистике", callback_data="stats")]])
 
 
 def reports_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Недельный отчёт → канал", callback_data="rep_week")],
         [InlineKeyboardButton("📤 Месячный отчёт → канал", callback_data="rep_month")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strat")],
     ])
 
 
@@ -351,9 +361,22 @@ def panel_text() -> str:
     return f"🏀 <b>IPBL Bot</b>\nПарсер: {st}"
 
 
-def stats_text() -> str:
+def stats_menu_text() -> str:
+    """Экран-меню статистики: выбор стратегии кнопкой."""
     bal0 = f"{BANKROLL_START:,.0f}".replace(",", " ")
-    lines = ["📊 <b>СТАТИСТИКА СТРАТЕГИЙ</b>", "", f"💰 Стартовый баланс: {bal0}₽"]
+    return ("🤖 <b>Статистика стратегий</b>\n\n"
+            f"💰 Стартовый баланс: {bal0}₽\n\n"
+            "Выбери стратегию, чтобы посмотреть её статистику ⤵️")
+
+
+def _bal_line() -> str:
+    bal0 = f"{BANKROLL_START:,.0f}".replace(",", " ")
+    return f"💰 Стартовый баланс: {bal0}₽"
+
+
+def stats_tm_text() -> str:
+    """Статистика стратегии «Сигнал ТМ» (+ уведомления Prime-перерыва)."""
+    lines = ["📊 <b>СТАТИСТИКА · СИГНАЛ ТМ</b>", "", _bal_line()]
     for code, name in STRATEGIES.items():
         s = database.bot_stats(code)
         lines += ["", "", f"🤖 <b>{name.upper()}</b>", ""]
@@ -383,10 +406,19 @@ def stats_text() -> str:
             if ls["wins"] + ls["losses"] > 0:
                 lines.append(f"🎯 Винрейт: {ls['winrate']:.0f}% | ROI: {ls['roi']:+.1f}%")
                 lines.append(f"💰 Прибыль: {money(ls['profit'])}")
-    lines.append(prime_stats_section())
-    lines.append(sh_stats_section())
-    lines.append(sh_total_stats_section())
     return "\n".join(lines)
+
+
+def stats_prime_text() -> str:
+    return _bal_line() + prime_stats_section()
+
+
+def stats_sh_text() -> str:
+    return _bal_line() + sh_stats_section()
+
+
+def stats_sht_text() -> str:
+    return _bal_line() + sh_total_stats_section()
 
 
 def prime_stats_section() -> str:
@@ -1386,16 +1418,35 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "status":
         now = datetime.now(MSK).strftime("%H:%M:%S")
-        st = "🟢 работает" if parser_running() else "🔴 остановлен"
+        on = lambda ok: "🟢 работает" if ok else "🔴 остановлен"
         active = database.active_count()
-        lines = [f"🏀 <b>Статус</b> — {now} МСК", f"Парсер: {st}",
-                 f"Активных сигналов (ждут итога): {active}", ""]
+        lines = [f"🏀 <b>Статус</b> — {now} МСК", "",
+                 "<b>Инструменты</b>",
+                 f"• Парсер IPBL: {on(parser_running())}",
+                 f"• Сборщик шорт-хоккея: {on(sh_parser_running())}",
+                 f"• Веб-панель: {on(panel_running())}",
+                 "",
+                 f"Активных сигналов (ждут итога): {active}",
+                 "",
+                 "<b>Окна работы стратегий</b>"]
         for code, name in STRATEGIES.items():
             lines.append(f"• <b>{name}</b>: {signals.window_status(code)}")
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
 
     elif data == "stats":
-        await q.edit_message_text(stats_text(), parse_mode="HTML", reply_markup=stats_kb())
+        await q.edit_message_text(stats_menu_text(), parse_mode="HTML", reply_markup=stats_kb())
+
+    elif data == "stats_tm":
+        await q.edit_message_text(stats_tm_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
+
+    elif data == "stats_prime":
+        await q.edit_message_text(stats_prime_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
+
+    elif data == "stats_sh":
+        await q.edit_message_text(stats_sh_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
+
+    elif data == "stats_sht":
+        await q.edit_message_text(stats_sht_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
 
     elif data == "export_sig":
         await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
@@ -1417,8 +1468,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 path.unlink()
             except Exception:
                 pass
-        await ctx.bot.send_message(q.message.chat_id, stats_text(),
-                                   parse_mode="HTML", reply_markup=stats_kb())
+        await ctx.bot.send_message(q.message.chat_id, strategy_text(),
+                                   parse_mode="HTML", reply_markup=strategy_kb())
 
     elif data == "reports":
         await q.edit_message_text(reports_text(), parse_mode="HTML", reply_markup=reports_kb())
