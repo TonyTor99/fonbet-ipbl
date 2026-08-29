@@ -17,7 +17,7 @@ from datetime import datetime, timezone, timedelta
 
 import database
 import tg_notify
-from config import SH_STRAT_CODE, sh_short_league
+from config import SH_STRAT_CODE, sh_short_league, sh_league_key
 
 log = logging.getLogger("sh_signals")
 MSK = timezone(timedelta(hours=3))
@@ -100,8 +100,11 @@ def process_match(state: dict, markets: dict):
     league = state["league"]
     minute = state["minute"]
 
+    # Сопоставляем лигу без хвостового формата 'NxM' (см. sh_league_key): имя лиги
+    # в правиле может отличаться форматом от живого (RHL Center/East ≠ 3x10).
+    lk = sh_league_key(league)
     rules = [r for r in database.sh_get_rules()
-             if r["enabled"] and r["sport_name"] == league]
+             if r["enabled"] and sh_league_key(r["sport_name"]) == lk]
     if not rules:
         return
 
