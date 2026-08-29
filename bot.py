@@ -174,14 +174,10 @@ def parse_windows_input(raw: str):
 # --- клавиатуры ------------------------------------------------------------
 
 def main_kb() -> InlineKeyboardMarkup:
-    toggle = (InlineKeyboardButton("⏹ Остановить парсер", callback_data="stop")
-              if parser_running() else
-              InlineKeyboardButton("▶️ Запустить парсер", callback_data="start"))
     panel_btn = (InlineKeyboardButton("⏹ Остановить веб-панель", callback_data="panel_stop")
                  if panel_running() else
                  InlineKeyboardButton("🖥 Запустить веб-панель", callback_data="panel_start"))
     return InlineKeyboardMarkup([
-        [toggle],
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
@@ -266,7 +262,11 @@ def confirm_sh_reset_kb() -> InlineKeyboardMarkup:
 # --- хаб «Стратегия»: настройки сигналов в одном месте ---------------------
 
 def strategy_kb() -> InlineKeyboardMarkup:
+    toggle = (InlineKeyboardButton("⏹ Остановить парсер IPBL", callback_data="stop")
+              if parser_running() else
+              InlineKeyboardButton("▶️ Запустить парсер IPBL", callback_data="start"))
     return InlineKeyboardMarkup([
+        [toggle],
         [InlineKeyboardButton("🎚 Запас сигнала (по лигам)", callback_data="thr")],
         [InlineKeyboardButton("🏀 Лиги (вкл/выкл)", callback_data="leagues")],
         [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
@@ -357,8 +357,7 @@ def confirm_reset_kb() -> InlineKeyboardMarkup:
 # --- тексты ----------------------------------------------------------------
 
 def panel_text() -> str:
-    st = "🟢 работает" if parser_running() else "🔴 остановлен"
-    return f"🏀 <b>IPBL Bot</b>\nПарсер: {st}"
+    return "🏀 <b>IPBL Bot</b>\nПарсеры включаются отдельно в меню каждого инструмента."
 
 
 def stats_menu_text() -> str:
@@ -764,7 +763,9 @@ def leagues_text() -> str:
 
 
 def strategy_text() -> str:
-    return ("🎯 <b>Стратегия ТМ</b>\n"
+    st = "🟢 работает" if parser_running() else "🔴 остановлен"
+    return ("🏀 <b>Стратегия IPBL</b>\n"
+            f"Парсер IPBL: {st}\n"
             "Настройки сигналов в перерыве: запас формулы по каждой лиге, "
             "вкл/выкл лиг, чаты, время работы, сброс БД.")
 
@@ -1408,13 +1409,13 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "start":
         start_parser()
-        await q.edit_message_text("✅ Парсер запущен.\n\n" + panel_text(),
-                                  parse_mode="HTML", reply_markup=main_kb())
+        await q.edit_message_text("✅ Парсер IPBL запущен.\n\n" + strategy_text(),
+                                  parse_mode="HTML", reply_markup=strategy_kb())
 
     elif data == "stop":
         stop_parser()
-        await q.edit_message_text("⏹ Парсер остановлен.\n\n" + panel_text(),
-                                  parse_mode="HTML", reply_markup=main_kb())
+        await q.edit_message_text("⏹ Парсер IPBL остановлен.\n\n" + strategy_text(),
+                                  parse_mode="HTML", reply_markup=strategy_kb())
 
     elif data == "panel_start":
         start_panel()
@@ -1442,7 +1443,6 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  "",
                  "<b>Стратегии</b>",
                  f"• 🏀 Стратегия IPBL: {signals.window_status('signal_tm')}",
-                 f"• 🔔 Prime перерыв: {signals.window_status('prime_info')}",
                  f"• 🏀 Стратегия Prime: "
                  f"{_rule_strat_status(prime_db.get_rules(), PRIME_STRAT_CODE, 'наборов')}",
                  f"• 🏒 Стратегия хоккея: "
