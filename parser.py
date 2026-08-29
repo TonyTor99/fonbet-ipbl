@@ -337,7 +337,7 @@ def main():
             collector_db.clear_db(_db)
         for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
             collector_periods_db.clear_db(_db)
-        print("БД очищена (сигналы + все сборщики IPBL + сборщики четвертей + Prime-стратегия).")
+        print("БД очищена (сигналы + все сборщики IPBL + сборщики четвертей + стратегия Prime).")
 
     print(f"Fonbet IPBL Parser | интервал={POLL_INTERVAL}с | расписание по МСК")
     print("Лиги:", ", ".join(n for n, _ in LEAGUES.values()))

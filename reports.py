@@ -94,7 +94,7 @@ def build_monthly_text(now: datetime | None = None) -> str:
 # Отчёты стратегии PRIME (отдельный источник — prime_db, отдельный чат).
 # День / неделя / месяц, тот же формат %% от банка.
 # ===========================================================================
-PRIME_HEADER = "Prime стратегия"
+PRIME_HEADER = "Стратегия Prime"
 
 
 def build_prime_daily_text(now: datetime | None = None, day: date | None = None) -> str:

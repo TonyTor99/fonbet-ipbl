@@ -187,7 +187,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
         [InlineKeyboardButton("🎯 Стратегия", callback_data="strat")],
-        [InlineKeyboardButton("🏀 Prime-стратегия", callback_data="pmstrat")],
+        [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="pmstrat")],
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="shtstrat")],
         [panel_btn],
@@ -392,9 +392,9 @@ def stats_text() -> str:
 def prime_stats_section() -> str:
     """Блок статистики Prime-стратегии для общего экрана «Статистика стратегий»."""
     rules = prime_db.get_rules()
-    lines = ["", "", "🏀 <b>PRIME-СТРАТЕГИЯ</b>", ""]
+    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRIME</b>", ""]
     if not rules:
-        lines.append("Наборов ещё нет — добавь в «🏀 Prime-стратегия».")
+        lines.append("Наборов ещё нет — добавь в «🏀 Стратегия Prime».")
         return "\n".join(lines)
     tot = prime_db.overall_stats()
     lines.append("<b>Общая статистика</b>")
@@ -525,7 +525,7 @@ async def _send_prime_report(bot, text: str):
     """Публикует отчёт в чат Prime-стратегии. (ok, err_text)."""
     cid = database.get_chat_id(PRIME_STRAT_CODE)
     if cid is None:
-        return False, "chat_id Prime-стратегии не задан (задай в «🏀 Prime-стратегия → Чат стратегии»)."
+        return False, "chat_id стратегии Prime не задан (задай в «🏀 Стратегия Prime → Чат стратегии»)."
     try:
         await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
         return True, None
@@ -1089,7 +1089,7 @@ def pmstrat_text() -> str:
     rules = prime_db.get_rules()
     on = sum(1 for r in rules if r["enabled"])
     return (
-        "🏀 <b>Prime-стратегия (ТМ / ИТМ1)</b>\n"
+        "🏀 <b>Стратегия Prime (ТМ / ИТМ1)</b>\n"
         f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}\n"
         f"Чат отправки: {'<code>' + str(cid) + '</code>' if cid is not None else '❗️ не задан'}\n"
         f"Наборов: {len(rules)} (включено {on})\n\n"
@@ -1116,7 +1116,7 @@ def pm_rule_label(rule: dict) -> str:
 
 def pmrules_text() -> str:
     rules = prime_db.get_rules()
-    lines = ["📋 <b>Наборы Prime-стратегии</b>", ""]
+    lines = ["📋 <b>Наборы стратегии Prime</b>", ""]
     if not rules:
         lines.append("Пока пусто. Нажми «➕ Добавить набор».")
     else:
@@ -1193,20 +1193,20 @@ def pmreports_text() -> str:
     cid = database.get_chat_id(PRIME_STRAT_CODE)
     target = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
     return (
-        "📈 <b>Отчёты Prime-стратегии</b>\n\n"
+        "📈 <b>Отчёты стратегии Prime</b>\n\n"
         "Процент прибыли — от банка "
         f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
         "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
         "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
         "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
-        f"Уходят в чат Prime-стратегии: {target}\n\n"
+        f"Уходят в чат стратегии Prime: {target}\n\n"
         "Кнопки ниже — отправить вручную сейчас."
     )
 
 
 def pmstats_text() -> str:
     rules = prime_db.get_rules()
-    lines = ["📊 <b>Статистика Prime-стратегии</b>", ""]
+    lines = ["📊 <b>Статистика стратегии Prime</b>", ""]
     if not rules:
         lines.append("Наборов ещё нет.")
         return "\n".join(lines)
@@ -2131,7 +2131,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["await"] = ("pmchat", None)
         cid = database.get_chat_id(PRIME_STRAT_CODE)
         await q.edit_message_text(
-            "⚙️ <b>Чат Prime-стратегии</b>\n"
+            "⚙️ <b>Чат стратегии Prime</b>\n"
             f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
             "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
             "Отмена — /start", parse_mode="HTML")
@@ -2158,13 +2158,13 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "pmreset_ask":
         await q.edit_message_text(
-            "⚠️ <b>Удалить все сигналы Prime-стратегии?</b>\n"
+            "⚠️ <b>Удалить все сигналы стратегии Prime?</b>\n"
             "Наборы и галочки пар не затрагиваются.\nОтменить нельзя.",
             parse_mode="HTML", reply_markup=confirm_pmreset_kb())
 
     elif data == "pmreset_yes":
         prime_db.clear_signals()
-        await q.edit_message_text("✅ Сигналы Prime-стратегии очищены.\n\n" + pmstrat_text(),
+        await q.edit_message_text("✅ Сигналы стратегии Prime очищены.\n\n" + pmstrat_text(),
                                   parse_mode="HTML", reply_markup=pmstrat_kb())
 
     elif data == "back":
@@ -2333,7 +2333,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         database.set_chat_id(PRIME_STRAT_CODE, cid)
         ctx.user_data.pop("await", None)
         await update.message.reply_text(
-            f"✅ Prime-стратегия → chat_id <code>{cid}</code>.",
+            f"✅ Стратегия Prime → chat_id <code>{cid}</code>.",
             parse_mode="HTML", reply_markup=pmstrat_kb())
 
     elif kind == "pm_rule_new":
