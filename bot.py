@@ -27,10 +27,12 @@ import sh_collector_db
 import sh_signals
 import sh_total_signals
 import export_shorthockey
+import prime_db
+import prime_signals
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES,
                     SH_STRAT_CODE, SH_STRAT_LEAGUES, SH_TOTAL_STRAT_CODE,
-                    sh_short_league)
+                    PRIME_STRAT_CODE, PRIME_MARKETS, sh_short_league)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -185,6 +187,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
         [InlineKeyboardButton("🎯 Стратегия", callback_data="strat")],
+        [InlineKeyboardButton("🏀 Prime-стратегия", callback_data="pmstrat")],
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="shtstrat")],
         [panel_btn],
@@ -380,8 +383,41 @@ def stats_text() -> str:
             if ls["wins"] + ls["losses"] > 0:
                 lines.append(f"🎯 Винрейт: {ls['winrate']:.0f}% | ROI: {ls['roi']:+.1f}%")
                 lines.append(f"💰 Прибыль: {money(ls['profit'])}")
+    lines.append(prime_stats_section())
     lines.append(sh_stats_section())
     lines.append(sh_total_stats_section())
+    return "\n".join(lines)
+
+
+def prime_stats_section() -> str:
+    """Блок статистики Prime-стратегии для общего экрана «Статистика стратегий»."""
+    rules = prime_db.get_rules()
+    lines = ["", "", "🏀 <b>PRIME-СТРАТЕГИЯ</b>", ""]
+    if not rules:
+        lines.append("Наборов ещё нет — добавь в «🏀 Prime-стратегия».")
+        return "\n".join(lines)
+    tot = prime_db.overall_stats()
+    lines.append("<b>Общая статистика</b>")
+    lines.append(f"📌 Сигналов: {tot['signals']}")
+    lines.append(f"✅ Зашло: {tot['wins']} | ❌ Не зашло: {tot['losses']} | "
+                 f"↩️ Возвраты: {tot['pushes']} | ⏸️ Без итога: {tot['no_result']}")
+    if tot["wins"] + tot["losses"] > 0:
+        bal = f"{tot['balance']:,.0f}".replace(",", " ")
+        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}%")
+        lines.append(f"🧮 ROI: {tot['roi']:+.1f}%")
+        lines.append(f"💰 Прибыль: {money(tot['profit'])}")
+        lines.append(f"🏦 Баланс: {bal}₽")
+    for r in rules:
+        st = prime_db.rule_stats(r["id"])
+        if st["signals"] == 0:
+            continue
+        lines += ["", f"🏀 <b>{prime_signals.market_label(r['market'])}</b> "
+                  f"(мин {r['minute']} · пар {prime_db.count_pairs(r['id'])})"]
+        lines.append(f"📌 Сигналов: {st['signals']}")
+        lines.append(f"✅ {st['wins']} | ❌ {st['losses']} | ↩️ {st['pushes']} | ⏸️ {st['no_result']}")
+        if st["wins"] + st["losses"] > 0:
+            lines.append(f"🎯 Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+            lines.append(f"💰 Прибыль: {money(st['profit'])}")
     return "\n".join(lines)
 
 
@@ -485,6 +521,18 @@ async def send_monthly_report(bot):
     return await _send_report(bot, reports.build_monthly_text())
 
 
+async def _send_prime_report(bot, text: str):
+    """Публикует отчёт в чат Prime-стратегии. (ok, err_text)."""
+    cid = database.get_chat_id(PRIME_STRAT_CODE)
+    if cid is None:
+        return False, "chat_id Prime-стратегии не задан (задай в «🏀 Prime-стратегия → Чат стратегии»)."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 # --- планировщик отчётов (без JobQueue: лёгкий asyncio-таск) ----------------
 # JobQueue у PTB требует extra [job-queue]; чтобы не тянуть зависимость на VPS,
 # проверяем время сами раз в минуту. Маркер уже отправленного периода лежит в БД
@@ -515,6 +563,30 @@ async def _report_scheduler(app):
                         print(f"[REPORT] monthly sent for {marker}")
                     else:
                         print(f"[REPORT] monthly NOT sent: {err}")
+            # Prime: дневной каждый день, недельный (Пн) и месячный (1-е) — с 09:00 МСК.
+            if now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("prime_daily") != marker:
+                    ok, err = await _send_prime_report(app.bot, reports.build_prime_daily_text(now))
+                    if ok:
+                        database.set_report_marker("prime_daily", marker)
+                        print(f"[REPORT] prime daily sent for {marker}")
+                    else:
+                        print(f"[REPORT] prime daily NOT sent: {err}")
+            if now.weekday() == 0 and now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("prime_weekly") != marker:
+                    ok, err = await _send_prime_report(app.bot, reports.build_prime_weekly_text(now))
+                    if ok:
+                        database.set_report_marker("prime_weekly", marker)
+                        print(f"[REPORT] prime weekly sent for {marker}")
+            if now.day == 1 and now.hour >= 9:
+                marker = now.strftime("%Y-%m")
+                if database.get_report_marker("prime_monthly") != marker:
+                    ok, err = await _send_prime_report(app.bot, reports.build_prime_monthly_text(now))
+                    if ok:
+                        database.set_report_marker("prime_monthly", marker)
+                        print(f"[REPORT] prime monthly sent for {marker}")
         except Exception as e:
             print(f"[REPORT sched error] {e}")
         await asyncio.sleep(60)
@@ -994,6 +1066,277 @@ def shtstats_text() -> str:
         line += f" | Винрейт {tot['winrate']:.0f}% | ROI {tot['roi']:+.1f}% | {money(tot['profit'])}"
     lines += ["", line]
     return "\n".join(lines)
+
+
+# --- Prime-стратегия -------------------------------------------------------
+
+PM_PAGE = 8   # пар на страницу в экране галочек
+
+
+def pmstrat_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Наборы (рынок+минута+пары)", callback_data="pmrules")],
+        [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="pmchat")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="pmstats")],
+        [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="pmreports")],
+        [InlineKeyboardButton("🗑 Сбросить сигналы", callback_data="pmreset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def pmstrat_text() -> str:
+    cid = database.get_chat_id(PRIME_STRAT_CODE)
+    rules = prime_db.get_rules()
+    on = sum(1 for r in rules if r["enabled"])
+    return (
+        "🏀 <b>Prime-стратегия (ТМ / ИТМ1)</b>\n"
+        f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}\n"
+        f"Чат отправки: {'<code>' + str(cid) + '</code>' if cid is not None else '❗️ не задан'}\n"
+        f"Наборов: {len(rules)} (включено {on})\n\n"
+        "Набор = рынок (ТМ или ИТМ1) + минута + галочки пар. На заданной игровой "
+        "минуте матча Prime муж по отмеченной паре шлётся сигнал по текущей крайней "
+        "линии рынка (без фильтра линии).\n"
+        "⚠️ Список пар берётся из сборщика Prime муж — он должен собирать матчи."
+    )
+
+
+def pmrules_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(pm_rule_label(r), callback_data=f"pmrule:{r['id']}")]
+            for r in prime_db.get_rules()]
+    rows.append([InlineKeyboardButton("➕ Добавить набор", callback_data="pmadd")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pmstrat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pm_rule_label(rule: dict) -> str:
+    mark = "✅" if rule["enabled"] else "🚫"
+    return (f"{mark} {prime_signals.market_label(rule['market'])} · мин {rule['minute']} · "
+            f"пар {prime_db.count_pairs(rule['id'])}")
+
+
+def pmrules_text() -> str:
+    rules = prime_db.get_rules()
+    lines = ["📋 <b>Наборы Prime-стратегии</b>", ""]
+    if not rules:
+        lines.append("Пока пусто. Нажми «➕ Добавить набор».")
+    else:
+        lines.append("Тап по набору — рынок/минута/пары/удаление.")
+    return "\n".join(lines)
+
+
+def pmadd_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, callback_data=f"pmaddmk:{code}")]
+            for code, label in PRIME_MARKETS.items()]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pmrules")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pmrule_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle, callback_data=f"pmtgl:{rid}")],
+        [InlineKeyboardButton(f"🔀 Рынок: {prime_signals.market_label(rule['market'])} → сменить",
+                              callback_data=f"pmmk:{rid}")],
+        [InlineKeyboardButton(f"✏️ Минута ({rule['minute']})", callback_data=f"pmmin:{rid}")],
+        [InlineKeyboardButton(f"☑️ Пары (отмечено {prime_db.count_pairs(rid)})",
+                              callback_data=f"pmpairs:{rid}")],
+        [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"pmdel_ask:{rid}")],
+        [InlineKeyboardButton("⬅️ К наборам", callback_data="pmrules")],
+    ])
+
+
+def pmrule_text(rule: dict) -> str:
+    st = prime_db.rule_stats(rule["id"])
+    lines = [
+        f"🏀 <b>Набор · {prime_signals.market_label(rule['market'])}</b>",
+        f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
+        "",
+        f"⏱ Минута сигнала: <b>{rule['minute']}</b>",
+        f"🎯 Рынок: <b>{prime_signals.market_label(rule['market'])}</b>",
+        f"☑️ Отмечено пар: <b>{prime_db.count_pairs(rule['id'])}</b>",
+        "",
+        "<b>Статистика</b>",
+        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
+    ]
+    if st["wins"] + st["losses"] > 0:
+        lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+        lines.append(f"Прибыль: {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def confirm_pmdel_kb(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"pmdel_yes:{rule_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"pmrule:{rule_id}"),
+    ]])
+
+
+def confirm_pmreset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="pmreset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="pmstrat"),
+    ]])
+
+
+def pmreports_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Дневной отчёт → чат", callback_data="pmrep_day")],
+        [InlineKeyboardButton("📤 Недельный отчёт → чат", callback_data="pmrep_week")],
+        [InlineKeyboardButton("📤 Месячный отчёт → чат", callback_data="pmrep_month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pmstrat")],
+    ])
+
+
+def pmreports_text() -> str:
+    cid = database.get_chat_id(PRIME_STRAT_CODE)
+    target = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
+    return (
+        "📈 <b>Отчёты Prime-стратегии</b>\n\n"
+        "Процент прибыли — от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
+        "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
+        "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
+        f"Уходят в чат Prime-стратегии: {target}\n\n"
+        "Кнопки ниже — отправить вручную сейчас."
+    )
+
+
+def pmstats_text() -> str:
+    rules = prime_db.get_rules()
+    lines = ["📊 <b>Статистика Prime-стратегии</b>", ""]
+    if not rules:
+        lines.append("Наборов ещё нет.")
+        return "\n".join(lines)
+    for r in rules:
+        st = prime_db.rule_stats(r["id"])
+        lines.append(f"🏀 <b>{prime_signals.market_label(r['market'])}</b> "
+                     f"(мин {r['minute']} · пар {prime_db.count_pairs(r['id'])})")
+        extra = ""
+        if st['wins'] + st['losses']:
+            extra = f" · WR {st['winrate']:.0f}% · {money(st['profit'])}"
+        lines.append(f"   Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                     f"↩️ {st['pushes']} | ⏸️ {st['no_result']}{extra}")
+    tot = prime_db.overall_stats()
+    settled = tot["wins"] + tot["losses"]
+    line = f"<b>ИТОГО:</b> сигналов {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | ↩️ {tot['pushes']}"
+    if settled:
+        line += f" | Винрейт {tot['winrate']:.0f}% | ROI {tot['roi']:+.1f}% | {money(tot['profit'])}"
+    lines += ["", line]
+    return "\n".join(lines)
+
+
+# --- экран галочек пар (с поиском/фильтром/пагинацией) ----------------------
+
+def _pm_view(ctx, rid: int) -> dict:
+    """Состояние экрана пар в user_data: rid, фильтр, поисковая строка, команда, страница."""
+    v = ctx.user_data.get("pm_view")
+    if not v or v.get("rid") != rid:
+        v = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        ctx.user_data["pm_view"] = v
+    return v
+
+
+def _pm_filtered_pairs(view: dict) -> list[tuple[str, str]]:
+    pairs = prime_db.distinct_pairs()
+    f = view.get("filter")
+    if f == "team":
+        t = view["team"].lower()
+        pairs = [p for p in pairs if p[0].lower() == t or p[1].lower() == t]
+    elif f == "search":
+        s = view["search"].lower()
+        pairs = [p for p in pairs if s in p[0].lower() or s in p[1].lower()]
+    elif f == "selected":
+        sel = prime_db.get_rule_pairs(view["rid"])
+        pairs = [p for p in pairs if p in sel]
+    return pairs
+
+
+def _pm_filter_name(view: dict) -> str:
+    f = view.get("filter")
+    if f == "team":
+        return f"команда «{view['team']}»"
+    if f == "search":
+        return f"поиск «{view['search']}»"
+    if f == "selected":
+        return "только отмеченные"
+    return "все пары"
+
+
+def pmpairs_text(ctx, rid: int) -> str:
+    view = _pm_view(ctx, rid)
+    rule = prime_db.get_rule(rid)
+    pairs = _pm_filtered_pairs(view)
+    total = len(prime_db.distinct_pairs())
+    sel = prime_db.count_pairs(rid)
+    mk = prime_signals.market_label(rule["market"]) if rule else "?"
+    lines = [
+        f"☑️ <b>Пары набора · {mk} · мин {rule['minute'] if rule else '?'}</b>",
+        f"Отмечено: <b>{sel}</b> из {total} пар",
+        f"Фильтр: {_pm_filter_name(view)} — найдено {len(pairs)}",
+        "",
+        "Тап по паре — поставить/снять ✅.",
+    ]
+    if not pairs:
+        lines.append("\nПод фильтр ничего не попало (или сборщик ещё пуст).")
+    return "\n".join(lines)
+
+
+def pmpairs_kb(ctx, rid: int) -> InlineKeyboardMarkup:
+    view = _pm_view(ctx, rid)
+    pairs = _pm_filtered_pairs(view)
+    sel = prime_db.get_rule_pairs(rid)
+
+    pages = max(1, (len(pairs) + PM_PAGE - 1) // PM_PAGE)
+    page = max(0, min(view["page"], pages - 1))
+    view["page"] = page
+    start = page * PM_PAGE
+    chunk = pairs[start:start + PM_PAGE]
+
+    rows = []
+    for pos, (a, b) in enumerate(chunk, start=start):
+        mark = "✅" if (a, b) in sel else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {prime_db.pair_label(a, b)}",
+                                          callback_data=f"pmtog:{pos}")])
+    # навигация по страницам
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data="pmpg:prev"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="pmnop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data="pmpg:next"))
+    if len(nav) > 1:
+        rows.append(nav)
+    # фильтры
+    rows.append([
+        InlineKeyboardButton("🔤 По команде", callback_data="pmflt_team"),
+        InlineKeyboardButton("🔍 Поиск", callback_data="pmflt_search"),
+    ])
+    sel_btn = ("❌ Снять фильтр" if view["filter"] else "☑️ Только отмеченные")
+    sel_cb = ("pmflt_none" if view["filter"] else "pmflt_sel")
+    rows.append([InlineKeyboardButton(sel_btn, callback_data=sel_cb)])
+    # массовые действия по текущему фильтру
+    rows.append([
+        InlineKeyboardButton("✔️ Отметить (фильтр)", callback_data="pmall_on"),
+        InlineKeyboardButton("✖️ Снять (фильтр)", callback_data="pmall_off"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"pmrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pmteams_kb(rid: int) -> InlineKeyboardMarkup:
+    teams = prime_db.distinct_teams()
+    rows, row = [], []
+    for i, t in enumerate(teams):
+        row.append(InlineKeyboardButton(t, callback_data=f"pmteam:{i}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ К парам", callback_data=f"pmpairs:{rid}")])
+    return InlineKeyboardMarkup(rows)
 
 
 # --- handlers --------------------------------------------------------------
@@ -1589,8 +1932,244 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ Сигналы стратегии тоталов очищены.\n\n" + shtstrat_text(),
                                   parse_mode="HTML", reply_markup=shtstrat_kb())
 
+    # --- Prime-стратегия ---------------------------------------------------
+    elif data == "pmstrat":
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("pm_view", None)
+        await q.edit_message_text(pmstrat_text(), parse_mode="HTML", reply_markup=pmstrat_kb())
+
+    elif data == "pmrules":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(pmrules_text(), parse_mode="HTML", reply_markup=pmrules_kb())
+
+    elif data == "pmadd":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(
+            "➕ <b>Новый набор</b>\nВыбери рынок ставки:",
+            parse_mode="HTML", reply_markup=pmadd_kb())
+
+    elif data.startswith("pmaddmk:"):
+        market = data.split(":", 1)[1]
+        if market not in PRIME_MARKETS:
+            return
+        ctx.user_data["await"] = ("pm_rule_new", market)
+        await q.edit_message_text(
+            f"🏀 <b>{PRIME_MARKETS[market]}</b>\n\n"
+            "Пришли <b>игровую минуту</b> сигнала одним числом, например <code>8</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pmrule:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            await q.edit_message_text(pmrules_text(), parse_mode="HTML", reply_markup=pmrules_kb())
+            return
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(pmrule_text(rule), parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
+    elif data.startswith("pmtgl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        prime_db.toggle_rule(rid)
+        rule = prime_db.get_rule(rid)
+        if rule:
+            await q.edit_message_text(pmrule_text(rule), parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
+    elif data.startswith("pmmk:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            return
+        other = "it1" if rule["market"] == "tm" else "tm"
+        prime_db.update_rule(rid, other, rule["minute"])
+        rule = prime_db.get_rule(rid)
+        await q.edit_message_text(pmrule_text(rule), parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
+    elif data.startswith("pmmin:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("pm_rule_min", rid)
+        await q.edit_message_text(
+            f"✏️ <b>Минута набора · {prime_signals.market_label(rule['market'])}</b>\n"
+            f"Сейчас: {rule['minute']}\n\n"
+            "Пришли новую минуту одним числом, например <code>10</code>.\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data.startswith("pmdel_ask:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить набор?</b>\n{pm_rule_label(rule)}\n"
+            "Галочки пар набора тоже удалятся. Отменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_pmdel_kb(rid))
+
+    elif data.startswith("pmdel_yes:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        prime_db.delete_rule(rid)
+        await q.edit_message_text("✅ Набор удалён.\n\n" + pmrules_text(),
+                                  parse_mode="HTML", reply_markup=pmrules_kb())
+
+    # экран галочек пар
+    elif data.startswith("pmpairs:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not prime_db.get_rule(rid):
+            return
+        ctx.user_data.pop("await", None)
+        ctx.user_data["pm_view"] = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        await q.edit_message_text(pmpairs_text(ctx, rid), parse_mode="HTML",
+                                  reply_markup=pmpairs_kb(ctx, rid))
+
+    elif data.startswith("pmtog:"):
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        try:
+            pos = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pairs = _pm_filtered_pairs(view)
+        if not (0 <= pos < len(pairs)):
+            return
+        a, b = pairs[pos]
+        prime_db.toggle_pair(view["rid"], a, b)
+        await q.edit_message_text(pmpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pmpairs_kb(ctx, view["rid"]))
+
+    elif data in ("pmpg:prev", "pmpg:next"):
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        view["page"] += (-1 if data.endswith("prev") else 1)
+        await q.edit_message_text(pmpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pmpairs_kb(ctx, view["rid"]))
+
+    elif data == "pmnop":
+        pass
+
+    elif data == "pmflt_none":
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        view.update(filter=None, search="", team="", page=0)
+        await q.edit_message_text(pmpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pmpairs_kb(ctx, view["rid"]))
+
+    elif data == "pmflt_sel":
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        view.update(filter="selected", page=0)
+        await q.edit_message_text(pmpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pmpairs_kb(ctx, view["rid"]))
+
+    elif data == "pmflt_search":
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        ctx.user_data["await"] = ("pm_search", view["rid"])
+        await q.edit_message_text(
+            "🔍 <b>Поиск пары</b>\nПришли часть названия команды, например <code>кем</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "pmflt_team":
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        await q.edit_message_text(
+            "🔤 <b>Фильтр по команде</b>\nВыбери команду:",
+            parse_mode="HTML", reply_markup=pmteams_kb(view["rid"]))
+
+    elif data.startswith("pmteam:"):
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        teams = prime_db.distinct_teams()
+        if not (0 <= idx < len(teams)):
+            return
+        view.update(filter="team", team=teams[idx], page=0)
+        await q.edit_message_text(pmpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pmpairs_kb(ctx, view["rid"]))
+
+    elif data in ("pmall_on", "pmall_off"):
+        view = ctx.user_data.get("pm_view")
+        if not view:
+            return
+        pairs = _pm_filtered_pairs(view)
+        prime_db.set_pairs(view["rid"], pairs, enabled=(data == "pmall_on"))
+        await q.edit_message_text(pmpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pmpairs_kb(ctx, view["rid"]))
+
+    elif data == "pmchat":
+        ctx.user_data["await"] = ("pmchat", None)
+        cid = database.get_chat_id(PRIME_STRAT_CODE)
+        await q.edit_message_text(
+            "⚙️ <b>Чат Prime-стратегии</b>\n"
+            f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
+            "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "pmstats":
+        await q.edit_message_text(pmstats_text(), parse_mode="HTML", reply_markup=pmstrat_kb())
+
+    elif data == "pmreports":
+        await q.edit_message_text(pmreports_text(), parse_mode="HTML", reply_markup=pmreports_kb())
+
+    elif data in ("pmrep_day", "pmrep_week", "pmrep_month"):
+        if data == "pmrep_day":
+            text, title = reports.build_prime_daily_text(), "Дневной"
+        elif data == "pmrep_week":
+            text, title = reports.build_prime_weekly_text(), "Недельный"
+        else:
+            text, title = reports.build_prime_monthly_text(), "Месячный"
+        ok, err = await _send_prime_report(ctx.bot, text)
+        if ok:
+            head = f"✅ {title} отчёт Prime отправлен. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=pmreports_kb())
+
+    elif data == "pmreset_ask":
+        await q.edit_message_text(
+            "⚠️ <b>Удалить все сигналы Prime-стратегии?</b>\n"
+            "Наборы и галочки пар не затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_pmreset_kb())
+
+    elif data == "pmreset_yes":
+        prime_db.clear_signals()
+        await q.edit_message_text("✅ Сигналы Prime-стратегии очищены.\n\n" + pmstrat_text(),
+                                  parse_mode="HTML", reply_markup=pmstrat_kb())
+
     elif data == "back":
         ctx.user_data.pop("await", None)
+        ctx.user_data.pop("pm_view", None)
         await q.edit_message_text(panel_text(), parse_mode="HTML", reply_markup=main_kb())
 
 
@@ -1745,6 +2324,65 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("✅ Готово.", reply_markup=shtrules_kb())
 
+    elif kind == "pmchat":
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_chat_id(PRIME_STRAT_CODE, cid)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Prime-стратегия → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=pmstrat_kb())
+
+    elif kind == "pm_rule_new":
+        market = code                                # code здесь = рынок ('tm'|'it1')
+        try:
+            minute = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ Минута — целое число, например 8. Ещё раз или /start.")
+            return
+        if minute < 0 or market not in PRIME_MARKETS:
+            ctx.user_data.pop("await", None)
+            return
+        rid = prime_db.add_rule(market, minute)
+        ctx.user_data.pop("await", None)
+        rule = prime_db.get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Набор создан: <b>{prime_signals.market_label(market)}</b> · мин {minute}.\n"
+            "Теперь отметь пары кнопкой «☑️ Пары».",
+            parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
+    elif kind == "pm_rule_min":
+        rid = code                                   # code здесь = id набора
+        try:
+            minute = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ Минута — целое число, например 10. Ещё раз или /start.")
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule or minute < 0:
+            ctx.user_data.pop("await", None)
+            return
+        prime_db.update_rule(rid, rule["market"], minute)
+        ctx.user_data.pop("await", None)
+        rule = prime_db.get_rule(rid)
+        await update.message.reply_text(
+            "✅ Минута изменена.\n\n" + pmrule_text(rule),
+            parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
+    elif kind == "pm_search":
+        rid = code                                   # code здесь = id набора
+        if not prime_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        view = _pm_view(ctx, rid)
+        view.update(filter="search", search=raw, page=0)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(pmpairs_text(ctx, rid), parse_mode="HTML",
+                                        reply_markup=pmpairs_kb(ctx, rid))
+
 
 def _valid_hhmm(s: str) -> bool:
     try:
@@ -1761,11 +2399,13 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 async def _post_init(app):
     """Стартует фоновый планировщик отчётов на общем event loop бота."""
     app.create_task(_report_scheduler(app))
-    print("Report scheduler started (weekly Mon 09:00 MSK, monthly 1st 09:00 MSK).")
+    print("Report scheduler started (weekly Mon 09:00, monthly 1st 09:00; "
+          "Prime daily/weekly/monthly 09:00 MSK).")
 
 
 def main():
     database.init_db()
+    prime_db.init_db()
     for _name, _db in COLLECTOR_LEAGUES.values():
         collector_db.init_db(_db)
     for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
