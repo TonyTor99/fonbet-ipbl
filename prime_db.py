@@ -354,6 +354,36 @@ def rule_stats(rule_id: int) -> dict:
             "profit": profit, "staked": staked, "roi": roi}
 
 
+def pair_stats(market: str, team1: str, team2: str) -> dict:
+    """Статистика встреч пары в рынке — для строки в тексте сигнала.
+
+    Учитываются только РАССЧИТАННЫЕ сигналы (Выигрыш|Проигрыш): count — их число,
+    roi/profit — по ним же. Возврат и нерассчитанные (result IS NULL) не входят.
+    Порядок команд не важен (нормализация norm_pair). Текущий сигнал попадёт в
+    статистику только после дорасчёта итога (при отправке его ещё нет в БД).
+    """
+    target = norm_pair(team1, team2)
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT team1, team2, result, profit FROM prime_signals "
+        "WHERE status='sent' AND market=? AND result IN ('Выигрыш', 'Проигрыш')",
+        (market,)).fetchall()
+    conn.close()
+    count = wins = 0
+    profit = 0.0
+    for r in rows:
+        if norm_pair(r["team1"], r["team2"]) != target:
+            continue
+        count += 1
+        if r["result"] == "Выигрыш":
+            wins += 1
+        if r["profit"] is not None:
+            profit += r["profit"]
+    staked = count * STAKE
+    roi = (profit / staked * 100) if staked else 0.0
+    return {"count": count, "wins": wins, "profit": profit, "roi": roi}
+
+
 def overall_stats(market: str | None = None) -> dict:
     tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
            "profit": 0.0, "staked": 0.0}

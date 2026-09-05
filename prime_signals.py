@@ -65,10 +65,17 @@ def _result(market: str, s1: int, s2: int, line: float) -> tuple[str, int | None
 
 # --- рендер ----------------------------------------------------------------
 
+def fmt_stats(st: dict) -> str:
+    """'📈 Статистика count/roi%/profit' по встречам пары в рынке."""
+    return f"📈 <b>Статистика {st['count']}/{st['roi']:.0f}%/{st['profit']:.0f}</b>"
+
+
 def render_signal(sig: dict) -> str:
+    st = prime_db.pair_stats(sig["market"], sig["team1"], sig["team2"])
     lines = [
         "🏀 <b>PRIME · СИГНАЛ</b>",
         fmt_teams(sig["team1"], sig["team2"]),
+        fmt_stats(st),
         "",
         f"⏱ <b>Минута {sig['minute']}</b>",
         f"📊 <b>Счёт {sig['score1']}:{sig['score2']}</b>",
