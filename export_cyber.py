@@ -9,6 +9,7 @@
     python export_cyber.py                 # -> export_cyber_YYYYMMDD_HHMMSS.xlsx
     python export_cyber.py /path/file.xlsx
 """
+import re
 import sys
 from datetime import datetime
 
@@ -22,8 +23,10 @@ MAIN_COLUMNS = [
     ("Дата МСК", "__date"),
     ("Время МСК", "__time"),
     ("Лига", "league"),
-    ("Команда 1", "team1"),
-    ("Команда 2", "team2"),
+    ("Команда 1", "__country1"),
+    ("Ник 1", "__nick1"),
+    ("Команда 2", "__country2"),
+    ("Ник 2", "__nick2"),
     ("До матча", "__prematch"),
     ("Отметка мин", "__minute"),
     ("Таймер", "__ts"),
@@ -66,11 +69,32 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 RESULT_KEYS = {h for h, k in MAIN_COLUMNS if k and k.startswith("r_")}
 
 
+_TEAM_RE = re.compile(r"^(.*?)\s*\(([^)]*)\)\s*$")
+
+
+def _split_team(name: str) -> tuple[str, str]:
+    """'Италия (siignstar)' -> ('Италия', 'siignstar'). Без скобок — ник пустой."""
+    if not name:
+        return "", ""
+    m = _TEAM_RE.match(name)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return name.strip(), ""
+
+
 def _fmt_line(x: float) -> str:
     return f"{x:g}"
 
 
 def _value(row: dict, key: str):
+    if key == "__country1":
+        return _split_team(row.get("team1"))[0]
+    if key == "__nick1":
+        return _split_team(row.get("team1"))[1]
+    if key == "__country2":
+        return _split_team(row.get("team2"))[0]
+    if key == "__nick2":
+        return _split_team(row.get("team2"))[1]
     if key == "__score":
         return f"{row['score1']}:{row['score2']}"
     if key == "__prematch":
