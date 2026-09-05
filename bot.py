@@ -223,17 +223,30 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Статус", callback_data="status")],
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
-        [InlineKeyboardButton("🏀 Стратегия IPBL", callback_data="strat")],
-        [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="pmstrat")],
-        [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
-        [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="shtstrat")],
-        [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="spstrat")],
+        [InlineKeyboardButton("🎯 Стратегии", callback_data="strats")],
         [panel_btn],
     ])
 
 
 def back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back")]])
+
+
+# --- хаб «Стратегии»: все стратегии в одном месте --------------------------
+
+def strats_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏀 Стратегия IPBL", callback_data="strat")],
+        [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="pmstrat")],
+        [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
+        [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="shtstrat")],
+        [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="spstrat")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def strats_text() -> str:
+    return "🎯 <b>Стратегии</b>\nВыбери стратегию для настройки и статистики:"
 
 
 # --- хаб «Сборщики»: все сборщики в одном месте ----------------------------
@@ -338,7 +351,7 @@ def strategy_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
         [InlineKeyboardButton("📥 Выгрузить сигналы (Excel)", callback_data="export_sig")],
         [InlineKeyboardButton("🗑 Сбросить БД стратегий", callback_data="reset_ask")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
     ])
 
 
@@ -979,7 +992,7 @@ def shstrat_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Статистика", callback_data="shstats")],
         [toggle],
         [InlineKeyboardButton("🗑 Сбросить БД сигналов", callback_data="shreset_ask")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
     ])
 
 
@@ -1142,7 +1155,7 @@ def shtstrat_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Статистика", callback_data="shtstats")],
         [toggle],
         [InlineKeyboardButton("🗑 Сбросить БД сигналов", callback_data="shtreset_ask")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
     ])
 
 
@@ -1271,7 +1284,7 @@ def pmstrat_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("📥 Excel ИТМ1", callback_data="pmexport:it1")],
         [InlineKeyboardButton("🗑 Сброс ТМ", callback_data="pmreset_ask:tm"),
          InlineKeyboardButton("🗑 Сброс ИТМ1", callback_data="pmreset_ask:it1")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
     ])
 
 
@@ -1568,7 +1581,7 @@ def spstrat_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="spreports")],
         [InlineKeyboardButton("📥 Excel", callback_data="spexport")],
         [InlineKeyboardButton("🗑 Сброс сигналов", callback_data="spreset_ask")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
     ])
 
 
@@ -1911,6 +1924,12 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"• 🏒 ШХ пары: "
                  f"{_rule_strat_status(sh_pair_db.get_rules(), SH_PAIR_STRAT_CODE, 'наборов')}"]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
+
+    elif data == "strats":
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("pm_view", None)
+        ctx.user_data.pop("sp_view", None)
+        await q.edit_message_text(strats_text(), parse_mode="HTML", reply_markup=strats_kb())
 
     elif data == "stats":
         await q.edit_message_text(stats_menu_text(), parse_mode="HTML", reply_markup=stats_kb())
