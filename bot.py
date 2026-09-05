@@ -32,11 +32,15 @@ import cyber_collector_db
 import export_cyber
 import prime_db
 import prime_signals
+import sh_pair_db
+import sh_pair_signals
+import export_sh_pair
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES,
                     SH_STRAT_CODE, SH_STRAT_LEAGUES, SH_TOTAL_STRAT_CODE,
                     PRIME_STRAT_CODE, PRIME_STRAT_CODE_TM, PRIME_STRAT_CODE_IT1,
-                    PRIME_STRAT_CHAT, PRIME_MARKETS, sh_short_league)
+                    PRIME_STRAT_CHAT, PRIME_MARKETS, sh_short_league,
+                    SH_PAIR_STRAT_CODE, SH_PAIR_SIDES, SH_PAIR_PREMATCH)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -223,6 +227,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="pmstrat")],
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="shtstrat")],
+        [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="spstrat")],
         [panel_btn],
     ])
 
@@ -373,6 +378,7 @@ def stats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Стратегия Prime", callback_data="stats_prime")],
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="stats_sh")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="stats_sht")],
+        [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="stats_shp")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
@@ -640,6 +646,18 @@ async def _send_prime_report(bot, text: str, market: str):
         return False, str(e)
 
 
+async def _send_sh_pair_report(bot, text: str):
+    """Публикует отчёт стратегии ШХ · Пары в её чат. (ok, err_text)."""
+    cid = database.get_chat_id(SH_PAIR_STRAT_CODE)
+    if cid is None:
+        return False, "chat_id ШХ · Пары не задан (задай в «🏒 Стратегия ШХ пары → Чат стратегии»)."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 # --- планировщик отчётов (без JobQueue: лёгкий asyncio-таск) ----------------
 # JobQueue у PTB требует extra [job-queue]; чтобы не тянуть зависимость на VPS,
 # проверяем время сами раз в минуту. Маркер уже отправленного периода лежит в БД
@@ -702,6 +720,33 @@ async def _report_scheduler(app):
                         if ok:
                             database.set_report_marker(key, marker)
                             print(f"[REPORT] prime {mk} monthly sent for {marker}")
+            # ШХ · Пары: дневной каждый день, недельный (Пн) и месячный (1-е) — с 09:00 МСК.
+            if now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("sh_pair_daily") != marker:
+                    ok, err = await _send_sh_pair_report(
+                        app.bot, reports.build_sh_pair_daily_text(now))
+                    if ok:
+                        database.set_report_marker("sh_pair_daily", marker)
+                        print(f"[REPORT] sh_pair daily sent for {marker}")
+                    else:
+                        print(f"[REPORT] sh_pair daily NOT sent: {err}")
+            if now.weekday() == 0 and now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("sh_pair_weekly") != marker:
+                    ok, err = await _send_sh_pair_report(
+                        app.bot, reports.build_sh_pair_weekly_text(now))
+                    if ok:
+                        database.set_report_marker("sh_pair_weekly", marker)
+                        print(f"[REPORT] sh_pair weekly sent for {marker}")
+            if now.day == 1 and now.hour >= 9:
+                marker = now.strftime("%Y-%m")
+                if database.get_report_marker("sh_pair_monthly") != marker:
+                    ok, err = await _send_sh_pair_report(
+                        app.bot, reports.build_sh_pair_monthly_text(now))
+                    if ok:
+                        database.set_report_marker("sh_pair_monthly", marker)
+                        print(f"[REPORT] sh_pair monthly sent for {marker}")
         except Exception as e:
             print(f"[REPORT sched error] {e}")
         await asyncio.sleep(60)
@@ -1480,6 +1525,321 @@ def pmteams_kb(rid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+# --- стратегия ШОРТ-ХОККЕЙ ПО ПАРАМ (тотал ТБ/ТМ, время прематч/минута) -----
+
+SP_PAGE = 8   # пар на страницу в экране галочек
+
+_SP_TIME_ALIASES = {"pre", "прематч", "премат", "п", "pm", "-1"}
+
+
+def parse_sp_time_line(raw: str):
+    """'pre 8.5 12.5' или '15 8.5 12.5' -> (minute, line_min, line_max) или None.
+
+    Время: 'pre'/'прематч'/'-1' = прематч (минута -1); иначе целое ≥ 0. Границы
+    линии можно в любом порядке — упорядочим сами."""
+    parts = raw.replace(",", ".").split()
+    if len(parts) != 3:
+        return None
+    t = parts[0].lower()
+    if t in _SP_TIME_ALIASES:
+        minute = SH_PAIR_PREMATCH
+    else:
+        try:
+            minute = int(parts[0])
+        except ValueError:
+            return None
+        if minute < 0:
+            return None
+    try:
+        a, b = float(parts[1]), float(parts[2])
+    except ValueError:
+        return None
+    if a <= 0 or b <= 0:
+        return None
+    line_min, line_max = (a, b) if a <= b else (b, a)
+    return minute, line_min, line_max
+
+
+def spstrat_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Наборы (сторона+время+линия+пары)", callback_data="sprules")],
+        [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="spchat")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="spstats")],
+        [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="spreports")],
+        [InlineKeyboardButton("📥 Excel", callback_data="spexport")],
+        [InlineKeyboardButton("🗑 Сброс сигналов", callback_data="spreset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
+    ])
+
+
+def _sp_chat_line() -> str:
+    cid = database.get_chat_id(SH_PAIR_STRAT_CODE)
+    val = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
+    return f"Чат отправки: {val}"
+
+
+def spstrat_text() -> str:
+    rules = sh_pair_db.get_rules()
+    on = sum(1 for r in rules if r["enabled"])
+    return (
+        "🏒 <b>Стратегия ШХ · Пары (ТБ/ТМ)</b>\n"
+        f"Сборщик: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}\n"
+        f"{_sp_chat_line()}\n"
+        f"Наборов: {len(rules)} (включено {on})\n\n"
+        "Набор = сторона (ТБ/ТМ) + время (Прематч или минута) + диапазон линии "
+        "тотала + галочки пар. На заданном моменте матча лиг MNHL / MNHL B по "
+        "отмеченной паре, если линия тотала в диапазоне, шлётся сигнал.\n"
+        "⚠️ Список пар берётся из сборщика шорт-хоккея (лиги MNHL) — он должен "
+        "собирать матчи."
+    )
+
+
+def sp_rule_label(rule: dict) -> str:
+    mark = "✅" if rule["enabled"] else "🚫"
+    return (f"{mark} {sh_pair_signals.side_label(rule['side'])} · "
+            f"{sh_pair_signals.time_label(rule['minute'])} · "
+            f"{sh_pair_signals.fmt_range(rule['line_min'], rule['line_max'])} · "
+            f"пар {sh_pair_db.count_pairs(rule['id'])}")
+
+
+def sprules_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(sp_rule_label(r), callback_data=f"sprule:{r['id']}")]
+            for r in sh_pair_db.get_rules()]
+    rows.append([InlineKeyboardButton("➕ Добавить набор", callback_data="spadd")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="spstrat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def sprules_text() -> str:
+    rules = sh_pair_db.get_rules()
+    lines = ["📋 <b>Наборы стратегии ШХ · Пары</b>", ""]
+    if not rules:
+        lines.append("Пока пусто. Нажми «➕ Добавить набор».")
+    else:
+        lines.append("Тап по набору — сторона/время-линия/пары/удаление.")
+    return "\n".join(lines)
+
+
+def spadd_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, callback_data=f"spaddside:{code}")]
+            for code, label in SH_PAIR_SIDES.items()]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="sprules")])
+    return InlineKeyboardMarkup(rows)
+
+
+def sprule_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle, callback_data=f"sptgl:{rid}")],
+        [InlineKeyboardButton(f"🔀 Сторона: {sh_pair_signals.side_label(rule['side'])} → сменить",
+                              callback_data=f"spside:{rid}")],
+        [InlineKeyboardButton("✏️ Время и линия", callback_data=f"spedit:{rid}")],
+        [InlineKeyboardButton(f"☑️ Пары (отмечено {sh_pair_db.count_pairs(rid)})",
+                              callback_data=f"sppairs:{rid}")],
+        [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"spdel_ask:{rid}")],
+        [InlineKeyboardButton("⬅️ К наборам", callback_data="sprules")],
+    ])
+
+
+def sprule_text(rule: dict) -> str:
+    st = sh_pair_db.rule_stats(rule["id"])
+    lines = [
+        f"🏒 <b>Набор · {sh_pair_signals.side_label(rule['side'])}</b>",
+        f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
+        "",
+        f"⏱ Время: <b>{sh_pair_signals.time_label(rule['minute'])}</b>",
+        f"🎯 Сторона: <b>{sh_pair_signals.side_label(rule['side'])}</b>",
+        f"📐 Диапазон линии: <b>{sh_pair_signals.fmt_range(rule['line_min'], rule['line_max'])}</b>",
+        f"☑️ Отмечено пар: <b>{sh_pair_db.count_pairs(rule['id'])}</b>",
+        "",
+        "<b>Статистика</b>",
+        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
+    ]
+    if st["wins"] + st["losses"] > 0:
+        lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+        lines.append(f"Прибыль: {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def confirm_spdel_kb(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"spdel_yes:{rule_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"sprule:{rule_id}"),
+    ]])
+
+
+def confirm_spreset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="spreset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="spstrat"),
+    ]])
+
+
+def spreports_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 День", callback_data="sprep:day"),
+         InlineKeyboardButton("неделя", callback_data="sprep:week"),
+         InlineKeyboardButton("месяц", callback_data="sprep:month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="spstrat")],
+    ])
+
+
+def spreports_text() -> str:
+    return (
+        "📈 <b>Отчёты стратегии ШХ · Пары</b>\n\n"
+        "Процент прибыли — от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
+        "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
+        "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
+        f"{_sp_chat_line()}\n\n"
+        "Кнопки ниже — отправить вручную сейчас."
+    )
+
+
+def sh_pair_stats_section() -> str:
+    """Блок статистики стратегии ШХ · Пары (для общего экрана и экрана статистики)."""
+    cid = database.get_chat_id(SH_PAIR_STRAT_CODE)
+    lines = ["", "", "🏒 <b>СТРАТЕГИЯ ШХ · ПАРЫ</b>  "
+             f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
+    rules = sh_pair_db.get_rules()
+    if not rules:
+        lines.append("Наборов ещё нет — добавь в «🏒 Стратегия ШХ пары».")
+        return "\n".join(lines)
+    tot = sh_pair_db.overall_stats()
+    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+                 f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
+    if tot["wins"] + tot["losses"] > 0:
+        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}")
+    for r in rules:
+        st = sh_pair_db.rule_stats(r["id"])
+        if st["signals"] == 0:
+            continue
+        lines += ["", f"• {sh_pair_signals.side_label(r['side'])} · "
+                  f"{sh_pair_signals.time_label(r['minute'])} · "
+                  f"{sh_pair_signals.fmt_range(r['line_min'], r['line_max'])}: "
+                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
+        if st["wins"] + st["losses"] > 0:
+            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def spstats_text() -> str:
+    return _bal_line() + sh_pair_stats_section()
+
+
+# --- экран галочек пар ШХ (с поиском/фильтром/пагинацией) -------------------
+
+def _sp_view(ctx, rid: int) -> dict:
+    v = ctx.user_data.get("sp_view")
+    if not v or v.get("rid") != rid:
+        v = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        ctx.user_data["sp_view"] = v
+    return v
+
+
+def _sp_filtered_pairs(view: dict) -> list[tuple[str, str]]:
+    pairs = sh_pair_db.distinct_pairs()
+    f = view.get("filter")
+    if f == "team":
+        t = view["team"].lower()
+        pairs = [p for p in pairs if p[0].lower() == t or p[1].lower() == t]
+    elif f == "search":
+        s = view["search"].lower()
+        pairs = [p for p in pairs if s in p[0].lower() or s in p[1].lower()]
+    elif f == "selected":
+        sel = sh_pair_db.get_rule_pairs(view["rid"])
+        pairs = [p for p in pairs if p in sel]
+    return pairs
+
+
+def _sp_filter_name(view: dict) -> str:
+    f = view.get("filter")
+    if f == "team":
+        return f"команда «{view['team']}»"
+    if f == "search":
+        return f"поиск «{view['search']}»"
+    if f == "selected":
+        return "только отмеченные"
+    return "все пары"
+
+
+def sppairs_text(ctx, rid: int) -> str:
+    view = _sp_view(ctx, rid)
+    rule = sh_pair_db.get_rule(rid)
+    pairs = _sp_filtered_pairs(view)
+    total = len(sh_pair_db.distinct_pairs())
+    sel = sh_pair_db.count_pairs(rid)
+    head = (f"{sh_pair_signals.side_label(rule['side'])} · "
+            f"{sh_pair_signals.time_label(rule['minute'])}" if rule else "?")
+    lines = [
+        f"☑️ <b>Пары набора · {head}</b>",
+        f"Отмечено: <b>{sel}</b> из {total} пар",
+        f"Фильтр: {_sp_filter_name(view)} — найдено {len(pairs)}",
+        "",
+        "Тап по паре — поставить/снять ✅.",
+    ]
+    if not pairs:
+        lines.append("\nПод фильтр ничего не попало (или сборщик MNHL ещё пуст).")
+    return "\n".join(lines)
+
+
+def sppairs_kb(ctx, rid: int) -> InlineKeyboardMarkup:
+    view = _sp_view(ctx, rid)
+    pairs = _sp_filtered_pairs(view)
+    sel = sh_pair_db.get_rule_pairs(rid)
+
+    pages = max(1, (len(pairs) + SP_PAGE - 1) // SP_PAGE)
+    page = max(0, min(view["page"], pages - 1))
+    view["page"] = page
+    start = page * SP_PAGE
+    chunk = pairs[start:start + SP_PAGE]
+
+    rows = []
+    for pos, (a, b) in enumerate(chunk, start=start):
+        mark = "✅" if (a, b) in sel else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {sh_pair_db.pair_label(a, b)}",
+                                          callback_data=f"sptog:{pos}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data="sppg:prev"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="spnop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data="sppg:next"))
+    if len(nav) > 1:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton("🔤 По команде", callback_data="spflt_team"),
+        InlineKeyboardButton("🔍 Поиск", callback_data="spflt_search"),
+    ])
+    sel_btn = ("❌ Снять фильтр" if view["filter"] else "☑️ Только отмеченные")
+    sel_cb = ("spflt_none" if view["filter"] else "spflt_sel")
+    rows.append([InlineKeyboardButton(sel_btn, callback_data=sel_cb)])
+    rows.append([
+        InlineKeyboardButton("✔️ Отметить (фильтр)", callback_data="spall_on"),
+        InlineKeyboardButton("✖️ Снять (фильтр)", callback_data="spall_off"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"sprule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def spteams_kb(rid: int) -> InlineKeyboardMarkup:
+    teams = sh_pair_db.distinct_teams()
+    rows, row = [], []
+    for i, t in enumerate(teams):
+        row.append(InlineKeyboardButton(t, callback_data=f"spteam:{i}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ К парам", callback_data=f"sppairs:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
 # --- handlers --------------------------------------------------------------
 
 def _authorized(update: Update) -> bool:
@@ -1547,7 +1907,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"• 🏒 Стратегия хоккея: "
                  f"{_rule_strat_status(database.sh_get_rules(), SH_STRAT_CODE, 'правил')}",
                  f"• 🏒 Стратегия тоталов: "
-                 f"{_rule_strat_status(database.sh_total_get_rules(), SH_TOTAL_STRAT_CODE, 'правил')}"]
+                 f"{_rule_strat_status(database.sh_total_get_rules(), SH_TOTAL_STRAT_CODE, 'правил')}",
+                 f"• 🏒 ШХ пары: "
+                 f"{_rule_strat_status(sh_pair_db.get_rules(), SH_PAIR_STRAT_CODE, 'наборов')}"]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
 
     elif data == "stats":
@@ -1564,6 +1926,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "stats_sht":
         await q.edit_message_text(stats_sht_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
+
+    elif data == "stats_shp":
+        await q.edit_message_text(spstats_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
 
     elif data == "export_sig":
         await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
@@ -2428,9 +2793,275 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"✅ Сигналы Prime {label} очищены.\n\n" + pmstrat_text(),
                                   parse_mode="HTML", reply_markup=pmstrat_kb())
 
+    # --- стратегия ШХ · Пары -----------------------------------------------
+    elif data == "spstrat":
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("sp_view", None)
+        await q.edit_message_text(spstrat_text(), parse_mode="HTML", reply_markup=spstrat_kb())
+
+    elif data == "sprules":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(sprules_text(), parse_mode="HTML", reply_markup=sprules_kb())
+
+    elif data == "spadd":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(
+            "➕ <b>Новый набор</b>\nВыбери сторону тотала:",
+            parse_mode="HTML", reply_markup=spadd_kb())
+
+    elif data.startswith("spaddside:"):
+        side = data.split(":", 1)[1]
+        if side not in SH_PAIR_SIDES:
+            return
+        ctx.user_data["await"] = ("sp_rule_new", side)
+        await q.edit_message_text(
+            f"🏒 <b>{sh_pair_signals.side_label(side)}</b>\n\n"
+            "Пришли <b>одной строкой</b>: <code>время линия_от линия_до</code>\n\n"
+            "Время: <code>pre</code> (прематч) или игровая минута числом.\n"
+            "Примеры: <code>pre 8.5 12.5</code> · <code>15 9.5 11.5</code>\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data.startswith("sprule:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = sh_pair_db.get_rule(rid)
+        if not rule:
+            await q.edit_message_text(sprules_text(), parse_mode="HTML", reply_markup=sprules_kb())
+            return
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(sprule_text(rule), parse_mode="HTML", reply_markup=sprule_kb(rule))
+
+    elif data.startswith("sptgl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        sh_pair_db.toggle_rule(rid)
+        rule = sh_pair_db.get_rule(rid)
+        if rule:
+            await q.edit_message_text(sprule_text(rule), parse_mode="HTML", reply_markup=sprule_kb(rule))
+
+    elif data.startswith("spside:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = sh_pair_db.get_rule(rid)
+        if not rule:
+            return
+        other = "under" if rule["side"] == "over" else "over"
+        sh_pair_db.update_rule(rid, other, rule["minute"], rule["line_min"], rule["line_max"])
+        rule = sh_pair_db.get_rule(rid)
+        await q.edit_message_text(sprule_text(rule), parse_mode="HTML", reply_markup=sprule_kb(rule))
+
+    elif data.startswith("spedit:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = sh_pair_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("sp_rule_edit", rid)
+        await q.edit_message_text(
+            f"✏️ <b>Время и линия · {sh_pair_signals.side_label(rule['side'])}</b>\n"
+            f"Сейчас: {sh_pair_signals.time_label(rule['minute'])} · "
+            f"{sh_pair_signals.fmt_range(rule['line_min'], rule['line_max'])}\n\n"
+            "Пришли новые параметры одной строкой:\n"
+            "<code>время линия_от линия_до</code>\n"
+            "Примеры: <code>pre 8.5 12.5</code> · <code>15 9.5 11.5</code>\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data.startswith("spdel_ask:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = sh_pair_db.get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить набор?</b>\n{sp_rule_label(rule)}\n"
+            "Галочки пар набора тоже удалятся. Отменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_spdel_kb(rid))
+
+    elif data.startswith("spdel_yes:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        sh_pair_db.delete_rule(rid)
+        await q.edit_message_text("✅ Набор удалён.\n\n" + sprules_text(),
+                                  parse_mode="HTML", reply_markup=sprules_kb())
+
+    # экран галочек пар
+    elif data.startswith("sppairs:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not sh_pair_db.get_rule(rid):
+            return
+        ctx.user_data.pop("await", None)
+        ctx.user_data["sp_view"] = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        await q.edit_message_text(sppairs_text(ctx, rid), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, rid))
+
+    elif data.startswith("sptog:"):
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        try:
+            pos = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pairs = _sp_filtered_pairs(view)
+        if not (0 <= pos < len(pairs)):
+            return
+        a, b = pairs[pos]
+        sh_pair_db.toggle_pair(view["rid"], a, b)
+        await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, view["rid"]))
+
+    elif data in ("sppg:prev", "sppg:next"):
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        view["page"] += (-1 if data.endswith("prev") else 1)
+        await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, view["rid"]))
+
+    elif data == "spnop":
+        pass
+
+    elif data == "spflt_none":
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        view.update(filter=None, search="", team="", page=0)
+        await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, view["rid"]))
+
+    elif data == "spflt_sel":
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        view.update(filter="selected", page=0)
+        await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, view["rid"]))
+
+    elif data == "spflt_search":
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        ctx.user_data["await"] = ("sp_search", view["rid"])
+        await q.edit_message_text(
+            "🔍 <b>Поиск пары</b>\nПришли часть названия команды, например <code>вулв</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "spflt_team":
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        await q.edit_message_text(
+            "🔤 <b>Фильтр по команде</b>\nВыбери команду:",
+            parse_mode="HTML", reply_markup=spteams_kb(view["rid"]))
+
+    elif data.startswith("spteam:"):
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        teams = sh_pair_db.distinct_teams()
+        if not (0 <= idx < len(teams)):
+            return
+        view.update(filter="team", team=teams[idx], page=0)
+        await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, view["rid"]))
+
+    elif data in ("spall_on", "spall_off"):
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        pairs = _sp_filtered_pairs(view)
+        sh_pair_db.set_pairs(view["rid"], pairs, enabled=(data == "spall_on"))
+        await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, view["rid"]))
+
+    elif data == "spchat":
+        ctx.user_data["await"] = ("spchat", None)
+        cid = database.get_chat_id(SH_PAIR_STRAT_CODE)
+        await q.edit_message_text(
+            "⚙️ <b>Чат стратегии ШХ · Пары</b>\n"
+            f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
+            "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "spstats":
+        await q.edit_message_text(spstats_text(), parse_mode="HTML", reply_markup=spstrat_kb())
+
+    elif data == "spreports":
+        await q.edit_message_text(spreports_text(), parse_mode="HTML", reply_markup=spreports_kb())
+
+    elif data.startswith("sprep:"):
+        period = data.split(":", 1)[1]
+        if period == "day":
+            text, title = reports.build_sh_pair_daily_text(), "Дневной"
+        elif period == "week":
+            text, title = reports.build_sh_pair_weekly_text(), "Недельный"
+        else:
+            text, title = reports.build_sh_pair_monthly_text(), "Месячный"
+        ok, err = await _send_sh_pair_report(ctx.bot, text)
+        if ok:
+            head = f"✅ {title} отчёт ШХ · Пары отправлен. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=spreports_kb())
+
+    elif data == "spexport":
+        await q.edit_message_text("⏳ Генерирую Excel ШХ · Пары…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"sh_pair_signals_{ts}.xlsx"
+        try:
+            n = export_sh_pair.build(str(path))
+            if n == 0:
+                await ctx.bot.send_message(q.message.chat_id,
+                                           "📊 Сигналов ШХ · Пары пока нет — нечего выгружать.")
+            else:
+                with open(path, "rb") as fp:
+                    await ctx.bot.send_document(
+                        chat_id=q.message.chat_id, document=fp, filename=path.name,
+                        caption=f"📊 ШХ · Пары · сигналов {n}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, spstrat_text(),
+                                   parse_mode="HTML", reply_markup=spstrat_kb())
+
+    elif data == "spreset_ask":
+        await q.edit_message_text(
+            "⚠️ <b>Удалить все сигналы стратегии ШХ · Пары?</b>\n"
+            "Наборы и галочки пар не затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_spreset_kb())
+
+    elif data == "spreset_yes":
+        sh_pair_db.clear_signals()
+        await q.edit_message_text("✅ Сигналы стратегии ШХ · Пары очищены.\n\n" + spstrat_text(),
+                                  parse_mode="HTML", reply_markup=spstrat_kb())
+
     elif data == "back":
         ctx.user_data.pop("await", None)
         ctx.user_data.pop("pm_view", None)
+        ctx.user_data.pop("sp_view", None)
         await q.edit_message_text(panel_text(), parse_mode="HTML", reply_markup=main_kb())
 
 
@@ -2645,6 +3276,74 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(pmpairs_text(ctx, rid), parse_mode="HTML",
                                         reply_markup=pmpairs_kb(ctx, rid))
 
+    # --- стратегия ШХ · Пары ---
+    elif kind == "spchat":
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_chat_id(SH_PAIR_STRAT_CODE, cid)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Стратегия ШХ · Пары → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=spstrat_kb())
+
+    elif kind == "sp_rule_new":
+        side = code                                  # code здесь = сторона ('over'|'under')
+        parsed = parse_sp_time_line(raw)
+        if not parsed:
+            await update.message.reply_text(
+                "❌ Формат: <code>время линия_от линия_до</code>, например "
+                "<code>pre 8.5 12.5</code> или <code>15 9.5 11.5</code>. Ещё раз или /start.",
+                parse_mode="HTML")
+            return
+        if side not in SH_PAIR_SIDES:
+            ctx.user_data.pop("await", None)
+            return
+        minute, line_min, line_max = parsed
+        rid = sh_pair_db.add_rule(side, minute, line_min, line_max)
+        ctx.user_data.pop("await", None)
+        rule = sh_pair_db.get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Набор создан: <b>{sh_pair_signals.side_label(side)}</b> · "
+            f"{sh_pair_signals.time_label(minute)} · "
+            f"{sh_pair_signals.fmt_range(line_min, line_max)}.\n"
+            "Теперь отметь пары кнопкой «☑️ Пары».",
+            parse_mode="HTML", reply_markup=sprule_kb(rule))
+
+    elif kind == "sp_rule_edit":
+        rid = code                                   # code здесь = id набора
+        parsed = parse_sp_time_line(raw)
+        if not parsed:
+            await update.message.reply_text(
+                "❌ Формат: <code>время линия_от линия_до</code>, например "
+                "<code>pre 8.5 12.5</code> или <code>15 9.5 11.5</code>. Ещё раз или /start.",
+                parse_mode="HTML")
+            return
+        rule = sh_pair_db.get_rule(rid)
+        if not rule:
+            ctx.user_data.pop("await", None)
+            return
+        minute, line_min, line_max = parsed
+        sh_pair_db.update_rule(rid, rule["side"], minute, line_min, line_max)
+        ctx.user_data.pop("await", None)
+        rule = sh_pair_db.get_rule(rid)
+        await update.message.reply_text(
+            "✅ Набор изменён.\n\n" + sprule_text(rule),
+            parse_mode="HTML", reply_markup=sprule_kb(rule))
+
+    elif kind == "sp_search":
+        rid = code                                   # code здесь = id набора
+        if not sh_pair_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        view = _sp_view(ctx, rid)
+        view.update(filter="search", search=raw, page=0)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(sppairs_text(ctx, rid), parse_mode="HTML",
+                                        reply_markup=sppairs_kb(ctx, rid))
+
 
 def _valid_hhmm(s: str) -> bool:
     try:
@@ -2668,6 +3367,7 @@ async def _post_init(app):
 def main():
     database.init_db()
     prime_db.init_db()
+    sh_pair_db.init_db()
     # Миграция: старый единый чат Prime (prime_strat) переносим в чат ТМ, если тот
     # ещё не задан. Чтобы после раздельных чатов не потерять текущую настройку.
     _old_prime_chat = database.get_chat_id(PRIME_STRAT_CODE)

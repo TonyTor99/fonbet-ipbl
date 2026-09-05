@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone, date
 
 import database
 import prime_db
+import sh_pair_db
 from config import BANKROLL_START
 
 MSK = timezone(timedelta(hours=3))
@@ -137,6 +138,52 @@ def build_prime_monthly_text(now: datetime | None = None, market: str = "tm") ->
     total = prime_db.profit_total(start.isoformat(), end.isoformat(), market)
     return "\n".join([
         _prime_header(market),
+        GREETING,
+        f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+# ===========================================================================
+# Отчёты стратегии ШОРТ-ХОККЕЙ ПО ПАРАМ (отдельный источник — sh_pair_db).
+# День / неделя / месяц, тот же формат %% от банка.
+# ===========================================================================
+SH_PAIR_HEADER = "Стратегия ШХ · Пары"
+
+
+def build_sh_pair_daily_text(now: datetime | None = None, day: date | None = None) -> str:
+    """Отчёт за один день (по умолчанию — вчера, как при авто-отправке в 09:00)."""
+    now = now or datetime.now(MSK)
+    day = day or (now.date() - timedelta(days=1))
+    total = sh_pair_db.profit_total(day.isoformat(), day.isoformat())
+    return "\n".join([
+        SH_PAIR_HEADER,
+        GREETING,
+        f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+def build_sh_pair_weekly_text(now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_week_range(now.date())
+    by_day = sh_pair_db.profit_by_day(start.isoformat(), end.isoformat())
+    total = sh_pair_db.profit_total(start.isoformat(), end.isoformat())
+    lines = [
+        SH_PAIR_HEADER,
+        GREETING,
+        f"За прошедшую неделю прибыль составила {_pct(total):.2f}%",
+    ]
+    for i in range(7):
+        d = start + timedelta(days=i)
+        lines.append(_day_line(d, by_day.get(d.isoformat(), 0.0)))
+    return "\n".join(lines)
+
+
+def build_sh_pair_monthly_text(now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_month_range(now.date())
+    total = sh_pair_db.profit_total(start.isoformat(), end.isoformat())
+    return "\n".join([
+        SH_PAIR_HEADER,
         GREETING,
         f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
     ])

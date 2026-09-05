@@ -22,6 +22,8 @@ import requests
 import sh_collector_db as db
 import sh_signals
 import sh_total_signals
+import sh_pair_signals
+import sh_pair_db
 from config import LINE_SERVERS, HEADERS, SCOPE_MARKET, POLL_INTERVAL, MAX_WORKERS
 from sh_config import (LEAGUE_PREFIX, PREMATCH_MINUTE, PREMATCH_COMMENT,
                        WIN1_FID, DRAW_FID, WIN2_FID, DC_1X_FID, DC_12_FID, DC_X2_FID,
@@ -400,6 +402,7 @@ def _finalize(eid: int, comment: str = ""):
     resolve(eid, s1, s2)
     sh_signals.resolve(eid, s1, s2, displayed=disp)   # дорасчёт сигналов стратегии 1X2
     sh_total_signals.resolve(eid, s1, s2, displayed=disp)   # дорасчёт сигналов тоталов
+    sh_pair_signals.resolve(eid, s1, s2, displayed=disp)   # дорасчёт сигналов стратегии по парам
     _known.pop(eid, None)
     _last_score.pop(eid, None)
     _last_comment.pop(eid, None)
@@ -495,6 +498,7 @@ def run_cycle() -> list[dict]:
                 mk = extract_markets(factors)
                 sh_signals.process_match(state, mk)
                 sh_total_signals.process_match(state, mk)
+                sh_pair_signals.process_match(state, mk)   # пары (в т.ч. прематч)
         except Exception as e:
             log.warning("sh_signal err ev=%s: %s", eid, e)
         results.append(state)
@@ -541,6 +545,7 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(name)s] %(message)s", datefmt="%H:%M:%S")
     db.init_db()
+    sh_pair_db.init_db()   # таблицы стратегии по парам (если парсер стартовал раньше бота)
     if args.reset:
         db.clear_db()
         print("БД шорт-хоккея очищена.")
