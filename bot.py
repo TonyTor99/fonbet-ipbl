@@ -28,6 +28,8 @@ import sh_collector_db
 import sh_signals
 import sh_total_signals
 import export_shorthockey
+import cyber_collector_db
+import export_cyber
 import prime_db
 import prime_signals
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
@@ -39,9 +41,11 @@ from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
 SH_LOG_FILE = DIR / "sh_parser.log"
+CYBER_LOG_FILE = DIR / "cyber_parser.log"
 MSK = timezone(timedelta(hours=3))
 _proc: subprocess.Popen | None = None
 _sh_proc: subprocess.Popen | None = None
+_cyber_proc: subprocess.Popen | None = None
 
 # Веб-панель fonbet-dashboard (on-demand systemd-сервис на этом же VPS)
 PANEL_SERVICE = "fonbet-dashboard"
@@ -114,6 +118,38 @@ def stop_sh_parser():
             _sh_proc.kill()
         _sh_proc = None
     subprocess.run(["pkill", "-f", "sh_parser.py"], capture_output=True)
+
+
+def cyber_parser_running() -> bool:
+    if _cyber_proc is not None and _cyber_proc.poll() is None:
+        return True
+    try:
+        r = subprocess.run(["pgrep", "-f", "cyber_parser.py"], capture_output=True, timeout=2)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def start_cyber_parser():
+    """Запускает cyber_parser.py (киберфутбол FC 26) subprocess'ом, если не запущен."""
+    global _cyber_proc
+    if cyber_parser_running():
+        return
+    f = open(CYBER_LOG_FILE, "a")
+    _cyber_proc = subprocess.Popen([sys.executable, "-u", str(DIR / "cyber_parser.py")],
+                                   cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
+
+
+def stop_cyber_parser():
+    global _cyber_proc
+    if _cyber_proc and _cyber_proc.poll() is None:
+        _cyber_proc.terminate()
+        try:
+            _cyber_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _cyber_proc.kill()
+        _cyber_proc = None
+    subprocess.run(["pkill", "-f", "cyber_parser.py"], capture_output=True)
 
 
 def panel_running() -> bool:
@@ -205,6 +241,7 @@ def collectors_kb() -> InlineKeyboardMarkup:
     for sid, (name, _db) in PERIOD_COLLECTOR_LEAGUES.items():
         rows.append([InlineKeyboardButton(f"🏀 Четверти · {name}", callback_data=f"pcol:{sid}")])
     rows.append([InlineKeyboardButton("🏒 Шорт-хоккей", callback_data="sh_collector")])
+    rows.append([InlineKeyboardButton("🎮 Киберфутбол FC 26", callback_data="cyber_collector")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(rows)
 
@@ -258,6 +295,26 @@ def confirm_sh_reset_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Да, удалить", callback_data="sh_reset_yes"),
         InlineKeyboardButton("❌ Отмена", callback_data="sh_collector"),
+    ]])
+
+
+def cyber_collector_kb() -> InlineKeyboardMarkup:
+    toggle = (InlineKeyboardButton("⏹ Остановить сборщик", callback_data="cyber_stop")
+              if cyber_parser_running() else
+              InlineKeyboardButton("▶️ Запустить сборщик", callback_data="cyber_start"))
+    return InlineKeyboardMarkup([
+        [toggle],
+        [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="cyber_export")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data="cyber_collector")],
+        [InlineKeyboardButton("🗑 Сбросить БД киберфутбола", callback_data="cyber_reset_ask")],
+        [InlineKeyboardButton("⬅️ К сборщикам", callback_data="collectors")],
+    ])
+
+
+def confirm_cyber_reset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="cyber_reset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cyber_collector"),
     ]])
 
 
@@ -656,6 +713,7 @@ def collectors_text() -> str:
         "📦 <b>Сборщики рынков</b>",
         f"Парсер IPBL: {'🟢 работает' if parser_running() else '🔴 остановлен'}",
         f"Шорт-хоккей: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}",
+        f"Киберфутбол FC 26: {'🟢 работает' if cyber_parser_running() else '🔴 остановлен'}",
         "",
         "Лиги IPBL (сбор идёт вместе с парсером, каждая в свой файл):",
     ]
@@ -741,6 +799,30 @@ def sh_collector_text() -> str:
             lines.append(f"• {e['team1']} — {e['team2']}: {e['minutes']} стр · {fin}")
     else:
         lines.append("Пока пусто — ждём live-матч шорт-хоккея.")
+    return "\n".join(lines)
+
+
+def cyber_collector_text() -> str:
+    st = cyber_collector_db.stats()
+    lines = [
+        "🎮 <b>Сборщик рынков киберфутбола FC 26</b>",
+        f"Сборщик: {'🟢 работает' if cyber_parser_running() else '🔴 остановлен'}",
+        "Лиги: все «FC 26…» (авто-подхват, Volta исключена)",
+        "Снимки: до матча + каждые 5 игровых минут (0-90).",
+        "",
+        f"Матчей собрано: <b>{st['events']}</b>",
+        f"Строк (снимков): <b>{st['rows']}</b>",
+        f"С результатом: <b>{st['resolved']}</b>",
+        "",
+    ]
+    summ = cyber_collector_db.events_summary(15)
+    if summ:
+        lines.append("Последние матчи:")
+        for e in summ:
+            fin = e["final_score"] if e["final_score"] else "идёт"
+            lines.append(f"• {e['team1']} — {e['team2']}: {e['marks']} стр · {fin}")
+    else:
+        lines.append("Пока пусто — ждём live-матч киберфутбола FC 26.")
     return "\n".join(lines)
 
 
@@ -1451,6 +1533,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  "<b>Инструменты</b>",
                  f"• Парсер IPBL: {on(parser_running())}",
                  f"• Сборщик шорт-хоккея: {on(sh_parser_running())}",
+                 f"• Сборщик киберфутбола FC 26: {on(cyber_parser_running())}",
                  f"• Веб-панель: {on(panel_running())}",
                  "",
                  f"Активных сигналов (ждут итога): {active}",
@@ -1706,6 +1789,54 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ БД шорт-хоккея очищена.\n\n" + sh_collector_text(),
                                   parse_mode="HTML", reply_markup=sh_collector_kb())
 
+    elif data == "cyber_collector":
+        await q.edit_message_text(cyber_collector_text(), parse_mode="HTML",
+                                  reply_markup=cyber_collector_kb())
+
+    elif data == "cyber_start":
+        start_cyber_parser()
+        await q.edit_message_text("✅ Сборщик киберфутбола запущен.\n\n" + cyber_collector_text(),
+                                  parse_mode="HTML", reply_markup=cyber_collector_kb())
+
+    elif data == "cyber_stop":
+        stop_cyber_parser()
+        await q.edit_message_text("⏹ Сборщик киберфутбола остановлен.\n\n" + cyber_collector_text(),
+                                  parse_mode="HTML", reply_markup=cyber_collector_kb())
+
+    elif data == "cyber_export":
+        st = cyber_collector_db.stats()
+        if st["rows"] == 0:
+            await q.edit_message_text("🎮 Сборщик пока пуст — нечего выгружать.",
+                                      parse_mode="HTML", reply_markup=cyber_collector_kb())
+            return
+        await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"cyberfootball_markets_{ts}.xlsx"
+        try:
+            export_cyber.build(str(path))
+            with open(path, "rb") as fp:
+                await ctx.bot.send_document(
+                    chat_id=q.message.chat_id, document=fp, filename=path.name,
+                    caption=f"🎮 Рынки киберфутбол FC 26 · матчей {st['events']} · строк {st['rows']}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, cyber_collector_text(),
+                                   parse_mode="HTML", reply_markup=cyber_collector_kb())
+
+    elif data == "cyber_reset_ask":
+        await q.edit_message_text("⚠️ <b>Удалить все снимки киберфутбола из БД?</b>\nОтменить нельзя.",
+                                  parse_mode="HTML", reply_markup=confirm_cyber_reset_kb())
+
+    elif data == "cyber_reset_yes":
+        cyber_collector_db.clear_db()
+        await q.edit_message_text("✅ БД киберфутбола очищена.\n\n" + cyber_collector_text(),
+                                  parse_mode="HTML", reply_markup=cyber_collector_kb())
+
     elif data == "chats":
         ctx.user_data.pop("await", None)
         await q.edit_message_text(chats_text(), parse_mode="HTML", reply_markup=chats_kb())
@@ -1769,7 +1900,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "reset_ask":
         await q.edit_message_text(
             "⚠️ <b>Удалить все сигналы из БД стратегий?</b>\n"
-            "Сборщики IPBL и шорт-хоккея не затрагиваются.\nОтменить нельзя.",
+            "Сборщики IPBL, шорт-хоккея и киберфутбола не затрагиваются.\nОтменить нельзя.",
             parse_mode="HTML", reply_markup=confirm_reset_kb())
 
     elif data == "reset_yes":
@@ -2548,16 +2679,19 @@ def main():
     for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
         collector_periods_db.init_db(_db)
     sh_collector_db.init_db()
+    cyber_collector_db.init_db()
     # Подчищаем «зависшие» парсеры от прошлого инстанса: при рестарте сервиса они
     # умирают не мгновенно, и pgrep внутри start_parser() видит их как живые →
     # запуск пропускается (гонка, из-за которой парсеры не поднимались). Форс-kill
     # гарантирует чистый старт нового набора парсеров.
     subprocess.run(["pkill", "-9", "-f", "/parser.py"], capture_output=True)
     subprocess.run(["pkill", "-9", "-f", "sh_parser.py"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", "cyber_parser.py"], capture_output=True)
     time.sleep(1.5)
     # Автозапуск парсеров при старте бота (в т.ч. после рестарта сервиса).
     start_parser()
     start_sh_parser()
+    start_cyber_parser()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
     app = (Application.builder().token(BOT_TOKEN).request(request)
