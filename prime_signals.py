@@ -71,7 +71,8 @@ def fmt_stats(st: dict) -> str:
 
 
 def render_signal(sig: dict) -> str:
-    st = prime_db.pair_stats(sig["market"], sig["team1"], sig["team2"])
+    st = prime_db.pair_stats_from_collector(
+        sig["market"], sig["team1"], sig["team2"], sig["minute"])
     lines = [
         "🏀 <b>PRIME · СИГНАЛ</b>",
         fmt_teams(sig["team1"], sig["team2"]),

@@ -384,6 +384,58 @@ def pair_stats(market: str, team1: str, team2: str) -> dict:
     return {"count": count, "wins": wins, "profit": profit, "roi": roi}
 
 
+# рынок -> (поле линии, поле кф «меньше», поле результата «меньше») в сборщике
+_COLLECTOR_FIELDS = {
+    "tm":  ("total_line", "total_m_odds", "r_total_m"),
+    "it1": ("it1_line", "it1_m_odds", "r_it1_m"),
+}
+
+
+def pair_stats_from_collector(market: str, team1: str, team2: str,
+                              minute: int) -> dict:
+    """Статистика встреч пары в рынке по СБОРЩИКУ (prime_markets.db).
+
+    В отличие от pair_stats() (только отправленные сигналы, ~единицы встреч),
+    считает по ВСЕМ матчам пары в сборщике на той же игровой минуте, что и правило
+    сигнала (вариант A) — данных на порядок больше (~десятки встреч на пару).
+
+    Для каждого матча берём последний снимок (MAX(id)) на минуте minute с
+    рассчитанным исходом «меньше» рынка и считаем гипотетическую флэт-ставку STAKE
+    по кф снимка: Выигрыш -> +STAKE*(кф-1), Проигрыш -> -STAKE. Возврат/нерасчёт
+    (result NULL) в счёт не идут. Порядок команд не важен (norm_pair).
+    """
+    fields = _COLLECTOR_FIELDS.get(market)
+    if fields is None:
+        return {"count": 0, "wins": 0, "profit": 0.0, "roi": 0.0}
+    line_f, odds_f, res_f = fields
+    target = norm_pair(team1, team2)
+    try:
+        conn = _source_conn()
+        rows = conn.execute(
+            f"SELECT team1, team2, {odds_f} AS odds, {res_f} AS res, MAX(id) "
+            "FROM market_snapshots "
+            f"WHERE game_minute=? AND {res_f} IN ('Выигрыш', 'Проигрыш') "
+            "GROUP BY event_id", (minute,)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return {"count": 0, "wins": 0, "profit": 0.0, "roi": 0.0}
+    count = wins = 0
+    profit = 0.0
+    for r in rows:
+        if norm_pair(r["team1"], r["team2"]) != target:
+            continue
+        count += 1
+        if r["res"] == "Выигрыш":
+            wins += 1
+            if r["odds"] is not None:
+                profit += STAKE * (float(r["odds"]) - 1.0)
+        else:
+            profit += -STAKE
+    staked = count * STAKE
+    roi = (profit / staked * 100) if staked else 0.0
+    return {"count": count, "wins": wins, "profit": profit, "roi": roi}
+
+
 def overall_stats(market: str | None = None) -> dict:
     tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
            "profit": 0.0, "staked": 0.0}
