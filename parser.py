@@ -25,11 +25,14 @@ import collector
 import collector_db
 import collector_periods
 import collector_periods_db
+import pq_signals
+import pq_db
 import prime_db
 import prime_signals
 from config import (LINE_SERVERS, HEADERS, SCOPE_MARKET, POLL_INTERVAL, MAX_WORKERS,
                     LEAGUES, HALFTIME_TS, HALFTIME_TOL_AFTER, MATCH_TOTAL_FIDS,
-                    COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES, PRIME_STRAT_LEAGUE)
+                    COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES, PRIME_STRAT_LEAGUE,
+                    PQ_STRAT_LEAGUE)
 
 log = logging.getLogger("parser")
 MSK = timezone(timedelta(hours=3))
@@ -157,6 +160,8 @@ def _finalize(eid: int, comment: str = ""):
         collector_periods.resolve(eid, quarters, s1, s2, PERIOD_COLLECTOR_LEAGUES[sid][1])
     if sid == PRIME_STRAT_LEAGUE:
         prime_signals.resolve(eid, s1, s2)
+    if sid == PQ_STRAT_LEAGUE:
+        pq_signals.resolve(eid, quarters, s1, s2)
     _known.pop(eid, None)
     _last_score.pop(eid, None)
     _last_comment.pop(eid, None)
@@ -270,6 +275,12 @@ def run_cycle() -> list[dict]:
             except Exception as e:
                 log.warning("prime_signals err ev=%s: %s", eid, e)
 
+        if meta["sportId"] == PQ_STRAT_LEAGUE:
+            try:
+                pq_signals.process_match(state, api_map.get(eid))
+            except Exception as e:
+                log.warning("pq_signals err ev=%s: %s", eid, e)
+
         results.append(state)
     return results
 
@@ -326,6 +337,7 @@ def main():
                         format="%(asctime)s [%(name)s] %(message)s", datefmt="%H:%M:%S")
     database.init_db()
     prime_db.init_db()
+    pq_db.init_db()
     for _name, _db in COLLECTOR_LEAGUES.values():
         collector_db.init_db(_db)
     for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():
@@ -333,6 +345,7 @@ def main():
     if args.reset:
         database.clear_db()
         prime_db.clear_signals()
+        pq_db.clear_signals()
         for _name, _db in COLLECTOR_LEAGUES.values():
             collector_db.clear_db(_db)
         for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():

@@ -35,12 +35,16 @@ import prime_signals
 import sh_pair_db
 import sh_pair_signals
 import export_sh_pair
+import pq_db
+import pq_signals
+import export_pq
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES,
                     SH_STRAT_CODE, SH_STRAT_LEAGUES, SH_TOTAL_STRAT_CODE,
                     PRIME_STRAT_CODE, PRIME_STRAT_CODE_TM, PRIME_STRAT_CODE_IT1,
                     PRIME_STRAT_CHAT, PRIME_MARKETS, sh_short_league,
-                    SH_PAIR_STRAT_CODE, SH_PAIR_SIDES, SH_PAIR_PREMATCH)
+                    SH_PAIR_STRAT_CODE, SH_PAIR_SIDES, SH_PAIR_PREMATCH,
+                    PQ_STRAT_CODE, PQ_SIDES)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -241,6 +245,7 @@ def strats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="shstrat")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="shtstrat")],
         [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="spstrat")],
+        [InlineKeyboardButton("🏀 Четверти Pro Жен", callback_data="pqstrat")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
@@ -392,6 +397,7 @@ def stats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏒 Стратегия хоккея", callback_data="stats_sh")],
         [InlineKeyboardButton("🏒 Стратегия тоталов", callback_data="stats_sht")],
         [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="stats_shp")],
+        [InlineKeyboardButton("🏀 Четверти Pro Жен", callback_data="stats_pq")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
@@ -671,6 +677,18 @@ async def _send_sh_pair_report(bot, text: str):
         return False, str(e)
 
 
+async def _send_pq_report(bot, text: str):
+    """Публикует отчёт стратегии Четверти Pro Ж в её чат. (ok, err_text)."""
+    cid = database.get_chat_id(PQ_STRAT_CODE)
+    if cid is None:
+        return False, "chat_id Четверти Pro Ж не задан (задай в «🏀 Четверти Pro Жен → Чат стратегии»)."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 # --- планировщик отчётов (без JobQueue: лёгкий asyncio-таск) ----------------
 # JobQueue у PTB требует extra [job-queue]; чтобы не тянуть зависимость на VPS,
 # проверяем время сами раз в минуту. Маркер уже отправленного периода лежит в БД
@@ -760,6 +778,30 @@ async def _report_scheduler(app):
                     if ok:
                         database.set_report_marker("sh_pair_monthly", marker)
                         print(f"[REPORT] sh_pair monthly sent for {marker}")
+            # Четверти Pro Жен: дневной каждый день, недельный (Пн), месячный (1-е) — 09:00 МСК.
+            if now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("pq_daily") != marker:
+                    ok, err = await _send_pq_report(app.bot, reports.build_pq_daily_text(now))
+                    if ok:
+                        database.set_report_marker("pq_daily", marker)
+                        print(f"[REPORT] pq daily sent for {marker}")
+                    else:
+                        print(f"[REPORT] pq daily NOT sent: {err}")
+            if now.weekday() == 0 and now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("pq_weekly") != marker:
+                    ok, err = await _send_pq_report(app.bot, reports.build_pq_weekly_text(now))
+                    if ok:
+                        database.set_report_marker("pq_weekly", marker)
+                        print(f"[REPORT] pq weekly sent for {marker}")
+            if now.day == 1 and now.hour >= 9:
+                marker = now.strftime("%Y-%m")
+                if database.get_report_marker("pq_monthly") != marker:
+                    ok, err = await _send_pq_report(app.bot, reports.build_pq_monthly_text(now))
+                    if ok:
+                        database.set_report_marker("pq_monthly", marker)
+                        print(f"[REPORT] pq monthly sent for {marker}")
         except Exception as e:
             print(f"[REPORT sched error] {e}")
         await asyncio.sleep(60)
@@ -1853,6 +1895,286 @@ def spteams_kb(rid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+# --- стратегия ЧЕТВЕРТИ Pro Жен (тотал ТБ/ТМ текущей четверти по парам) ------
+
+PQ_PAGE = 8   # пар на страницу в экране галочек
+
+
+def pqstrat_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Наборы (сторона+минуты+пары)", callback_data="pqrules")],
+        [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="pqchat")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="pqstats")],
+        [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="pqreports")],
+        [InlineKeyboardButton("📥 Excel", callback_data="pqexport")],
+        [InlineKeyboardButton("🗑 Сброс сигналов", callback_data="pqreset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
+    ])
+
+
+def _pq_chat_line() -> str:
+    cid = database.get_chat_id(PQ_STRAT_CODE)
+    val = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
+    return f"Чат отправки: {val}"
+
+
+def pqstrat_text() -> str:
+    rules = pq_db.get_rules()
+    on = sum(1 for r in rules if r["enabled"])
+    return (
+        "🏀 <b>Четверти Pro Жен (ТБ/ТМ четверти)</b>\n"
+        f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}\n"
+        f"{_pq_chat_line()}\n"
+        f"Наборов: {len(rules)} (включено {on})\n\n"
+        "Набор = сторона (ТБ/ТМ) + минуты (напр. 7,17,27) + галочки пар. На каждой "
+        "минуте по отмеченной паре берём тотал ТЕКУЩЕЙ четверти (7→1-я, 17→2-я, "
+        "27→3-я) и шлём сигнал; расчёт — по счёту этой четверти.\n"
+        "⚠️ Список пар берётся из сборщика четвертей Pro жен — он должен собирать "
+        "матчи (парсер IPBL запущен)."
+    )
+
+
+def pq_rule_label(rule: dict) -> str:
+    mark = "✅" if rule["enabled"] else "🚫"
+    return (f"{mark} {pq_signals.side_label(rule['side'])} · "
+            f"мин {pq_db.minutes_label(rule)} · пар {pq_db.count_pairs(rule['id'])}")
+
+
+def pqrules_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(pq_rule_label(r), callback_data=f"pqrule:{r['id']}")]
+            for r in pq_db.get_rules()]
+    rows.append([InlineKeyboardButton("➕ Добавить набор", callback_data="pqadd")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pqstrat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pqrules_text() -> str:
+    rules = pq_db.get_rules()
+    lines = ["📋 <b>Наборы стратегии Четверти Pro Ж</b>", ""]
+    if not rules:
+        lines.append("Пока пусто. Нажми «➕ Добавить набор».")
+    else:
+        lines.append("Тап по набору — сторона/минуты/пары/удаление.")
+    return "\n".join(lines)
+
+
+def pqadd_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, callback_data=f"pqaddside:{code}")]
+            for code, label in PQ_SIDES.items()]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pqrules")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pqrule_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle, callback_data=f"pqtgl:{rid}")],
+        [InlineKeyboardButton(f"🔀 Сторона: {pq_signals.side_label(rule['side'])} → сменить",
+                              callback_data=f"pqside:{rid}")],
+        [InlineKeyboardButton(f"✏️ Минуты ({pq_db.minutes_label(rule)})",
+                              callback_data=f"pqmins:{rid}")],
+        [InlineKeyboardButton(f"☑️ Пары (отмечено {pq_db.count_pairs(rid)})",
+                              callback_data=f"pqpairs:{rid}")],
+        [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"pqdel_ask:{rid}")],
+        [InlineKeyboardButton("⬅️ К наборам", callback_data="pqrules")],
+    ])
+
+
+def pqrule_text(rule: dict) -> str:
+    st = pq_db.rule_stats(rule["id"])
+    lines = [
+        f"🏀 <b>Набор · {pq_signals.side_label(rule['side'])}</b>",
+        f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
+        "",
+        f"⏱ Минуты: <b>{pq_db.minutes_label(rule)}</b>",
+        f"🎯 Сторона: <b>{pq_signals.side_label(rule['side'])}</b> (тотал четверти)",
+        f"☑️ Отмечено пар: <b>{pq_db.count_pairs(rule['id'])}</b>",
+        "",
+        "<b>Статистика</b>",
+        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
+    ]
+    if st["wins"] + st["losses"] > 0:
+        lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+        lines.append(f"Прибыль: {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def confirm_pqdel_kb(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"pqdel_yes:{rule_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"pqrule:{rule_id}"),
+    ]])
+
+
+def confirm_pqreset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="pqreset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="pqstrat"),
+    ]])
+
+
+def pqreports_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 День", callback_data="pqrep:day"),
+         InlineKeyboardButton("неделя", callback_data="pqrep:week"),
+         InlineKeyboardButton("месяц", callback_data="pqrep:month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pqstrat")],
+    ])
+
+
+def pqreports_text() -> str:
+    return (
+        "📈 <b>Отчёты стратегии Четверти Pro Ж</b>\n\n"
+        "Процент прибыли — от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
+        "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
+        "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
+        f"{_pq_chat_line()}\n\n"
+        "Кнопки ниже — отправить вручную сейчас."
+    )
+
+
+def pq_stats_section() -> str:
+    cid = database.get_chat_id(PQ_STRAT_CODE)
+    lines = ["", "", "🏀 <b>ЧЕТВЕРТИ Pro ЖЕН</b>  "
+             f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
+    rules = pq_db.get_rules()
+    if not rules:
+        lines.append("Наборов ещё нет — добавь в «🏀 Четверти Pro Жен».")
+        return "\n".join(lines)
+    tot = pq_db.overall_stats()
+    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+                 f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
+    if tot["wins"] + tot["losses"] > 0:
+        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}")
+    for r in rules:
+        st = pq_db.rule_stats(r["id"])
+        if st["signals"] == 0:
+            continue
+        lines += ["", f"• {pq_signals.side_label(r['side'])} · мин {pq_db.minutes_label(r)}: "
+                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
+        if st["wins"] + st["losses"] > 0:
+            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def pqstats_text() -> str:
+    return _bal_line() + pq_stats_section()
+
+
+# --- экран галочек пар Четвертей (фильтр/поиск/пагинация) -------------------
+
+def _pq_view(ctx, rid: int) -> dict:
+    v = ctx.user_data.get("pq_view")
+    if not v or v.get("rid") != rid:
+        v = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        ctx.user_data["pq_view"] = v
+    return v
+
+
+def _pq_filtered_pairs(view: dict) -> list[tuple[str, str]]:
+    pairs = pq_db.distinct_pairs()
+    f = view.get("filter")
+    if f == "team":
+        t = view["team"].lower()
+        pairs = [p for p in pairs if p[0].lower() == t or p[1].lower() == t]
+    elif f == "search":
+        s = view["search"].lower()
+        pairs = [p for p in pairs if s in p[0].lower() or s in p[1].lower()]
+    elif f == "selected":
+        sel = pq_db.get_rule_pairs(view["rid"])
+        pairs = [p for p in pairs if p in sel]
+    return pairs
+
+
+def _pq_filter_name(view: dict) -> str:
+    f = view.get("filter")
+    if f == "team":
+        return f"команда «{view['team']}»"
+    if f == "search":
+        return f"поиск «{view['search']}»"
+    if f == "selected":
+        return "только отмеченные"
+    return "все пары"
+
+
+def pqpairs_text(ctx, rid: int) -> str:
+    view = _pq_view(ctx, rid)
+    rule = pq_db.get_rule(rid)
+    pairs = _pq_filtered_pairs(view)
+    total = len(pq_db.distinct_pairs())
+    sel = pq_db.count_pairs(rid)
+    head = (f"{pq_signals.side_label(rule['side'])} · мин {pq_db.minutes_label(rule)}"
+            if rule else "?")
+    lines = [
+        f"☑️ <b>Пары набора · {head}</b>",
+        f"Отмечено: <b>{sel}</b> из {total} пар",
+        f"Фильтр: {_pq_filter_name(view)} — найдено {len(pairs)}",
+        "",
+        "Тап по паре — поставить/снять ✅.",
+    ]
+    if not pairs:
+        lines.append("\nПод фильтр ничего не попало (или сборщик четвертей ещё пуст).")
+    return "\n".join(lines)
+
+
+def pqpairs_kb(ctx, rid: int) -> InlineKeyboardMarkup:
+    view = _pq_view(ctx, rid)
+    pairs = _pq_filtered_pairs(view)
+    sel = pq_db.get_rule_pairs(rid)
+
+    pages = max(1, (len(pairs) + PQ_PAGE - 1) // PQ_PAGE)
+    page = max(0, min(view["page"], pages - 1))
+    view["page"] = page
+    start = page * PQ_PAGE
+    chunk = pairs[start:start + PQ_PAGE]
+
+    rows = []
+    for pos, (a, b) in enumerate(chunk, start=start):
+        mark = "✅" if (a, b) in sel else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {pq_db.pair_label(a, b)}",
+                                          callback_data=f"pqtog:{pos}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data="pqpg:prev"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="pqnop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data="pqpg:next"))
+    if len(nav) > 1:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton("🔤 По команде", callback_data="pqflt_team"),
+        InlineKeyboardButton("🔍 Поиск", callback_data="pqflt_search"),
+    ])
+    sel_btn = ("❌ Снять фильтр" if view["filter"] else "☑️ Только отмеченные")
+    sel_cb = ("pqflt_none" if view["filter"] else "pqflt_sel")
+    rows.append([InlineKeyboardButton(sel_btn, callback_data=sel_cb)])
+    rows.append([
+        InlineKeyboardButton("✔️ Отметить (фильтр)", callback_data="pqall_on"),
+        InlineKeyboardButton("✖️ Снять (фильтр)", callback_data="pqall_off"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"pqrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pqteams_kb(rid: int) -> InlineKeyboardMarkup:
+    teams = pq_db.distinct_teams()
+    rows, row = [], []
+    for i, t in enumerate(teams):
+        row.append(InlineKeyboardButton(t, callback_data=f"pqteam:{i}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ К парам", callback_data=f"pqpairs:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
 # --- handlers --------------------------------------------------------------
 
 def _authorized(update: Update) -> bool:
@@ -1922,7 +2244,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"• 🏒 Стратегия тоталов: "
                  f"{_rule_strat_status(database.sh_total_get_rules(), SH_TOTAL_STRAT_CODE, 'правил')}",
                  f"• 🏒 ШХ пары: "
-                 f"{_rule_strat_status(sh_pair_db.get_rules(), SH_PAIR_STRAT_CODE, 'наборов')}"]
+                 f"{_rule_strat_status(sh_pair_db.get_rules(), SH_PAIR_STRAT_CODE, 'наборов')}",
+                 f"• 🏀 Четверти Pro Ж: "
+                 f"{_rule_strat_status(pq_db.get_rules(), PQ_STRAT_CODE, 'наборов')}"]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
 
     elif data == "strats":
@@ -1948,6 +2272,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "stats_shp":
         await q.edit_message_text(spstats_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
+
+    elif data == "stats_pq":
+        await q.edit_message_text(pqstats_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
 
     elif data == "export_sig":
         await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
@@ -3077,10 +3404,272 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ Сигналы стратегии ШХ · Пары очищены.\n\n" + spstrat_text(),
                                   parse_mode="HTML", reply_markup=spstrat_kb())
 
+    # --- стратегия Четверти Pro Жен ----------------------------------------
+    elif data == "pqstrat":
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("pq_view", None)
+        await q.edit_message_text(pqstrat_text(), parse_mode="HTML", reply_markup=pqstrat_kb())
+
+    elif data == "pqrules":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(pqrules_text(), parse_mode="HTML", reply_markup=pqrules_kb())
+
+    elif data == "pqadd":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(
+            "➕ <b>Новый набор</b>\nВыбери сторону тотала:",
+            parse_mode="HTML", reply_markup=pqadd_kb())
+
+    elif data.startswith("pqaddside:"):
+        side = data.split(":", 1)[1]
+        if side not in PQ_SIDES:
+            return
+        ctx.user_data["await"] = ("pq_rule_new", side)
+        await q.edit_message_text(
+            f"🏀 <b>{pq_signals.side_label(side)}</b>\n\n"
+            "Пришли <b>минуты</b> через пробел или запятую, например <code>7,17,27</code>.\n"
+            "На каждой минуте берётся тотал текущей четверти (7→1-я, 17→2-я, 27→3-я).\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pqrule:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = pq_db.get_rule(rid)
+        if not rule:
+            await q.edit_message_text(pqrules_text(), parse_mode="HTML", reply_markup=pqrules_kb())
+            return
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(pqrule_text(rule), parse_mode="HTML", reply_markup=pqrule_kb(rule))
+
+    elif data.startswith("pqtgl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pq_db.toggle_rule(rid)
+        rule = pq_db.get_rule(rid)
+        if rule:
+            await q.edit_message_text(pqrule_text(rule), parse_mode="HTML", reply_markup=pqrule_kb(rule))
+
+    elif data.startswith("pqside:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = pq_db.get_rule(rid)
+        if not rule:
+            return
+        other = "under" if rule["side"] == "over" else "over"
+        pq_db.update_rule(rid, other, pq_db.minutes_list(rule))
+        rule = pq_db.get_rule(rid)
+        await q.edit_message_text(pqrule_text(rule), parse_mode="HTML", reply_markup=pqrule_kb(rule))
+
+    elif data.startswith("pqmins:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = pq_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("pq_rule_mins", rid)
+        await q.edit_message_text(
+            f"✏️ <b>Минуты набора · {pq_signals.side_label(rule['side'])}</b>\n"
+            f"Сейчас: {pq_db.minutes_label(rule)}\n\n"
+            "Пришли новые минуты через пробел или запятую, например <code>7,17,27</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pqdel_ask:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = pq_db.get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить набор?</b>\n{pq_rule_label(rule)}\n"
+            "Галочки пар набора тоже удалятся. Отменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_pqdel_kb(rid))
+
+    elif data.startswith("pqdel_yes:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pq_db.delete_rule(rid)
+        await q.edit_message_text("✅ Набор удалён.\n\n" + pqrules_text(),
+                                  parse_mode="HTML", reply_markup=pqrules_kb())
+
+    # экран галочек пар
+    elif data.startswith("pqpairs:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not pq_db.get_rule(rid):
+            return
+        ctx.user_data.pop("await", None)
+        ctx.user_data["pq_view"] = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        await q.edit_message_text(pqpairs_text(ctx, rid), parse_mode="HTML",
+                                  reply_markup=pqpairs_kb(ctx, rid))
+
+    elif data.startswith("pqtog:"):
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        try:
+            pos = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pairs = _pq_filtered_pairs(view)
+        if not (0 <= pos < len(pairs)):
+            return
+        a, b = pairs[pos]
+        pq_db.toggle_pair(view["rid"], a, b)
+        await q.edit_message_text(pqpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pqpairs_kb(ctx, view["rid"]))
+
+    elif data in ("pqpg:prev", "pqpg:next"):
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        view["page"] += (-1 if data.endswith("prev") else 1)
+        await q.edit_message_text(pqpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pqpairs_kb(ctx, view["rid"]))
+
+    elif data == "pqnop":
+        pass
+
+    elif data == "pqflt_none":
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        view.update(filter=None, search="", team="", page=0)
+        await q.edit_message_text(pqpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pqpairs_kb(ctx, view["rid"]))
+
+    elif data == "pqflt_sel":
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        view.update(filter="selected", page=0)
+        await q.edit_message_text(pqpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pqpairs_kb(ctx, view["rid"]))
+
+    elif data == "pqflt_search":
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        ctx.user_data["await"] = ("pq_search", view["rid"])
+        await q.edit_message_text(
+            "🔍 <b>Поиск пары</b>\nПришли часть названия команды.\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data == "pqflt_team":
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        await q.edit_message_text(
+            "🔤 <b>Фильтр по команде</b>\nВыбери команду:",
+            parse_mode="HTML", reply_markup=pqteams_kb(view["rid"]))
+
+    elif data.startswith("pqteam:"):
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        teams = pq_db.distinct_teams()
+        if not (0 <= idx < len(teams)):
+            return
+        view.update(filter="team", team=teams[idx], page=0)
+        await q.edit_message_text(pqpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pqpairs_kb(ctx, view["rid"]))
+
+    elif data in ("pqall_on", "pqall_off"):
+        view = ctx.user_data.get("pq_view")
+        if not view:
+            return
+        pairs = _pq_filtered_pairs(view)
+        pq_db.set_pairs(view["rid"], pairs, enabled=(data == "pqall_on"))
+        await q.edit_message_text(pqpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pqpairs_kb(ctx, view["rid"]))
+
+    elif data == "pqchat":
+        ctx.user_data["await"] = ("pqchat", None)
+        cid = database.get_chat_id(PQ_STRAT_CODE)
+        await q.edit_message_text(
+            "⚙️ <b>Чат стратегии Четверти Pro Ж</b>\n"
+            f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
+            "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "pqstats":
+        await q.edit_message_text(pqstats_text(), parse_mode="HTML", reply_markup=pqstrat_kb())
+
+    elif data == "pqreports":
+        await q.edit_message_text(pqreports_text(), parse_mode="HTML", reply_markup=pqreports_kb())
+
+    elif data.startswith("pqrep:"):
+        period = data.split(":", 1)[1]
+        if period == "day":
+            text, title = reports.build_pq_daily_text(), "Дневной"
+        elif period == "week":
+            text, title = reports.build_pq_weekly_text(), "Недельный"
+        else:
+            text, title = reports.build_pq_monthly_text(), "Месячный"
+        ok, err = await _send_pq_report(ctx.bot, text)
+        if ok:
+            head = f"✅ {title} отчёт Четверти Pro Ж отправлен. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=pqreports_kb())
+
+    elif data == "pqexport":
+        await q.edit_message_text("⏳ Генерирую Excel Четверти Pro Ж…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"pq_signals_{ts}.xlsx"
+        try:
+            n = export_pq.build(str(path))
+            if n == 0:
+                await ctx.bot.send_message(q.message.chat_id,
+                                           "📊 Сигналов Четверти Pro Ж пока нет — нечего выгружать.")
+            else:
+                with open(path, "rb") as fp:
+                    await ctx.bot.send_document(
+                        chat_id=q.message.chat_id, document=fp, filename=path.name,
+                        caption=f"📊 Четверти Pro Ж · сигналов {n}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, pqstrat_text(),
+                                   parse_mode="HTML", reply_markup=pqstrat_kb())
+
+    elif data == "pqreset_ask":
+        await q.edit_message_text(
+            "⚠️ <b>Удалить все сигналы стратегии Четверти Pro Ж?</b>\n"
+            "Наборы и галочки пар не затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_pqreset_kb())
+
+    elif data == "pqreset_yes":
+        pq_db.clear_signals()
+        await q.edit_message_text("✅ Сигналы стратегии Четверти Pro Ж очищены.\n\n" + pqstrat_text(),
+                                  parse_mode="HTML", reply_markup=pqstrat_kb())
+
     elif data == "back":
         ctx.user_data.pop("await", None)
         ctx.user_data.pop("pm_view", None)
         ctx.user_data.pop("sp_view", None)
+        ctx.user_data.pop("pq_view", None)
         await q.edit_message_text(panel_text(), parse_mode="HTML", reply_markup=main_kb())
 
 
@@ -3363,6 +3952,69 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(sppairs_text(ctx, rid), parse_mode="HTML",
                                         reply_markup=sppairs_kb(ctx, rid))
 
+    # --- стратегия Четверти Pro Жен ---
+    elif kind == "pqchat":
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_chat_id(PQ_STRAT_CODE, cid)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Четверти Pro Ж → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=pqstrat_kb())
+
+    elif kind == "pq_rule_new":
+        side = code                                  # code здесь = сторона ('over'|'under')
+        minutes = pq_db.parse_minutes(raw)
+        if not minutes:
+            await update.message.reply_text(
+                "❌ Минуты — числа через пробел/запятую, например <code>7,17,27</code>. "
+                "Ещё раз или /start.", parse_mode="HTML")
+            return
+        if side not in PQ_SIDES:
+            ctx.user_data.pop("await", None)
+            return
+        rid = pq_db.add_rule(side, minutes)
+        ctx.user_data.pop("await", None)
+        rule = pq_db.get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Набор создан: <b>{pq_signals.side_label(side)}</b> · "
+            f"мин {pq_db.minutes_label(rule)}.\n"
+            "Теперь отметь пары кнопкой «☑️ Пары».",
+            parse_mode="HTML", reply_markup=pqrule_kb(rule))
+
+    elif kind == "pq_rule_mins":
+        rid = code                                   # code здесь = id набора
+        minutes = pq_db.parse_minutes(raw)
+        if not minutes:
+            await update.message.reply_text(
+                "❌ Минуты — числа через пробел/запятую, например <code>7,17,27</code>. "
+                "Ещё раз или /start.", parse_mode="HTML")
+            return
+        rule = pq_db.get_rule(rid)
+        if not rule:
+            ctx.user_data.pop("await", None)
+            return
+        pq_db.update_rule(rid, rule["side"], minutes)
+        ctx.user_data.pop("await", None)
+        rule = pq_db.get_rule(rid)
+        await update.message.reply_text(
+            "✅ Минуты изменены.\n\n" + pqrule_text(rule),
+            parse_mode="HTML", reply_markup=pqrule_kb(rule))
+
+    elif kind == "pq_search":
+        rid = code                                   # code здесь = id набора
+        if not pq_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        view = _pq_view(ctx, rid)
+        view.update(filter="search", search=raw, page=0)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(pqpairs_text(ctx, rid), parse_mode="HTML",
+                                        reply_markup=pqpairs_kb(ctx, rid))
+
 
 def _valid_hhmm(s: str) -> bool:
     try:
@@ -3387,6 +4039,7 @@ def main():
     database.init_db()
     prime_db.init_db()
     sh_pair_db.init_db()
+    pq_db.init_db()
     # Миграция: старый единый чат Prime (prime_strat) переносим в чат ТМ, если тот
     # ещё не задан. Чтобы после раздельных чатов не потерять текущую настройку.
     _old_prime_chat = database.get_chat_id(PRIME_STRAT_CODE)
