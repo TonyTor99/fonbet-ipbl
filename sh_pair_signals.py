@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 
 import database
 import sh_pair_db
+import signals
 import tg_notify
 from config import (SH_PAIR_STRAT_CODE, SH_PAIR_SIDES, SH_PAIR_PREMATCH,
                     SH_PAIR_LEAGUES, STAKE, sh_short_league, sh_league_key)
@@ -110,6 +111,10 @@ def render_signal(sig: dict) -> str:
 def process_match(state: dict, markets: dict):
     """Каждый цикл sh_parser для каждого матча шорт-хоккея (в т.ч. прематч)."""
     if sh_league_key(state["league"]) not in _LEAGUE_KEYS:
+        return
+
+    # Вне окна работы стратегии (график задаётся кнопкой бота) сигналы не шлём.
+    if not signals.in_schedule(SH_PAIR_STRAT_CODE):
         return
 
     # Момент срабатывания: прематч -> сентинел -1; иначе — текущая игровая минута.

@@ -1701,6 +1701,7 @@ def spstrat_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📋 Наборы (сторона+время+линия+пары)", callback_data="sprules")],
         [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="spchat")],
+        [InlineKeyboardButton("⏰ Время работы", callback_data="spsched")],
         [InlineKeyboardButton("📊 Статистика", callback_data="spstats")],
         [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="spreports")],
         [InlineKeyboardButton("📥 Excel", callback_data="spexport")],
@@ -1722,6 +1723,8 @@ def spstrat_text() -> str:
         "🏒 <b>Стратегия ШХ · Пары (ТБ/ТМ)</b>\n"
         f"Сборщик: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}\n"
         f"{_sp_chat_line()}\n"
+        f"Время работы: {signals.fmt_windows(SH_PAIR_STRAT_CODE)} · "
+        f"{signals.window_status(SH_PAIR_STRAT_CODE)}\n"
         f"Наборов: {len(rules)} (включено {on})\n\n"
         "Набор = сторона (ТБ/ТМ) + время (Прематч или минута) + диапазон линии "
         "тотала + галочки пар. На заданном моменте матча лиг MNHL / MNHL B по "
@@ -1729,6 +1732,25 @@ def spstrat_text() -> str:
         "⚠️ Список пар берётся из сборщика шорт-хоккея (лиги MNHL) — он должен "
         "собирать матчи."
     )
+
+
+def spsched_text() -> str:
+    return (
+        "⏰ <b>Время работы · ШХ Пары</b> (МСК)\n"
+        "Сигналы шлются только внутри окон работы; вне окон стратегия молчит.\n\n"
+        f"Сейчас: <b>{signals.fmt_windows(SH_PAIR_STRAT_CODE)}</b>\n"
+        f"Статус: {signals.window_status(SH_PAIR_STRAT_CODE)}\n\n"
+        "Нажми «✏️ Изменить» и пришли одно или несколько окон через запятую:\n"
+        "<code>10:00-12:00, 16:00-18:00, 20:00-22:00</code>\n"
+        "или <code>off</code> — круглосуточно."
+    )
+
+
+def spsched_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Изменить", callback_data="spsetsched")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="spstrat")],
+    ])
 
 
 def sp_rule_label(rule: dict) -> str:
@@ -1956,6 +1978,13 @@ def sppairs_kb(ctx, rid: int) -> InlineKeyboardMarkup:
     sel_btn = ("❌ Снять фильтр" if view["filter"] else "☑️ Только отмеченные")
     sel_cb = ("spflt_none" if view["filter"] else "spflt_sel")
     rows.append([InlineKeyboardButton(sel_btn, callback_data=sel_cb)])
+    # Глобальный переключатель ВСЕХ пар (независимо от фильтра): если отмечены все —
+    # предлагаем снять все, иначе — отметить все.
+    total_all = len(sh_pair_db.distinct_pairs())
+    all_selected = total_all > 0 and sh_pair_db.count_pairs(rid) >= total_all
+    glob_btn = ("🚫 Снять ВСЕ пары" if all_selected else "✅ Отметить ВСЕ пары")
+    glob_cb = ("spallg_off" if all_selected else "spallg_on")
+    rows.append([InlineKeyboardButton(glob_btn, callback_data=glob_cb)])
     rows.append([
         InlineKeyboardButton("✔️ Отметить (фильтр)", callback_data="spall_on"),
         InlineKeyboardButton("✖️ Снять (фильтр)", callback_data="spall_off"),
@@ -3470,6 +3499,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
                                   reply_markup=sppairs_kb(ctx, view["rid"]))
 
+    elif data in ("spallg_on", "spallg_off"):
+        view = ctx.user_data.get("sp_view")
+        if not view:
+            return
+        all_pairs = sh_pair_db.distinct_pairs()   # ВСЕ пары, игнорируя фильтр
+        sh_pair_db.set_pairs(view["rid"], all_pairs, enabled=(data == "spallg_on"))
+        await q.edit_message_text(sppairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=sppairs_kb(ctx, view["rid"]))
+
     elif data == "spchat":
         ctx.user_data["await"] = ("spchat", None)
         cid = database.get_chat_id(SH_PAIR_STRAT_CODE)
@@ -3478,6 +3516,19 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
             "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
             "Отмена — /start", parse_mode="HTML")
+
+    elif data == "spsched":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(spsched_text(), parse_mode="HTML", reply_markup=spsched_kb())
+
+    elif data == "spsetsched":
+        ctx.user_data["await"] = ("spsched", SH_PAIR_STRAT_CODE)
+        await q.edit_message_text(
+            "⏰ Пришли окна работы (МСК) для <b>ШХ · Пары</b>.\n"
+            "Одно или несколько через запятую:\n"
+            "<code>10:00-12:00, 16:00-18:00, 20:00-22:00</code>\n"
+            "или <code>off</code> — круглосуточно.\nОтмена — /start",
+            parse_mode="HTML")
 
     elif data == "spstats":
         await q.edit_message_text(spstats_text(), parse_mode="HTML", reply_markup=spstrat_kb())
@@ -3852,6 +3903,19 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ {STRATEGIES.get(code, code)} → {signals.fmt_windows(code)}.",
             parse_mode="HTML", reply_markup=main_kb())
+
+    elif kind == "spsched":
+        value, ok = parse_windows_input(raw)
+        if not ok:
+            await update.message.reply_text(
+                "❌ Формат: <code>10:00-12:00, 16:00-18:00</code> или <code>off</code>.",
+                parse_mode="HTML")
+            return
+        database.set_windows(SH_PAIR_STRAT_CODE, value)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ ШХ · Пары → время работы {signals.fmt_windows(SH_PAIR_STRAT_CODE)}.",
+            parse_mode="HTML", reply_markup=spstrat_kb())
 
     elif kind == "shchat":
         try:
