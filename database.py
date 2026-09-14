@@ -503,6 +503,20 @@ def profit_total(start: str, end: str) -> float:
     return v
 
 
+def daily_stats(day: str) -> dict:
+    """Счётчики исходов (В/П/Возврат) и прибыль стратегии signal_tm за один день
+    ('YYYY-MM-DD'). Тот же фильтр, что в отчётах о прибыли: сыгранные сигналы в
+    окне работы при включённой лиге, группировка по дню создания (день матча, МСК)."""
+    conn = _conn()
+    base = f"FROM signals WHERE {_PROFIT_WHERE} AND date(created_at)=?"
+    wins   = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", (day,)).fetchone()[0]
+    losses = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", (day,)).fetchone()[0]
+    pushes = conn.execute(f"SELECT COUNT(*) {base} AND result='Возврат'", (day,)).fetchone()[0]
+    profit = conn.execute(f"SELECT COALESCE(SUM(profit), 0) {base}", (day,)).fetchone()[0]
+    conn.close()
+    return {"wins": wins, "losses": losses, "pushes": pushes, "profit": profit}
+
+
 def get_report_marker(kind: str) -> str | None:
     conn = _conn()
     row = conn.execute("SELECT marker FROM report_state WHERE kind=?", (kind,)).fetchone()

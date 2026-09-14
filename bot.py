@@ -466,6 +466,7 @@ def stats_sub_kb() -> InlineKeyboardMarkup:
 
 def reports_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Отчёт за вчера → канал", callback_data="rep_day")],
         [InlineKeyboardButton("📤 Недельный отчёт → канал", callback_data="rep_week")],
         [InlineKeyboardButton("📤 Месячный отчёт → канал", callback_data="rep_month")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="strat")],
@@ -682,6 +683,7 @@ def reports_text() -> str:
         "📈 <b>Отчёты прибыли</b>\n\n"
         "Процент прибыли считается от банка "
         f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Дневной</b> — автоматически каждый день 09:00 МСК (итог за прошедший день: ✅/✖️/♻️ и прибыль).\n"
         "• <b>Недельный</b> — автоматически в понедельник 09:00 МСК (за прошедшую неделю Пн–Вс, с разбивкой по дням).\n"
         "• <b>Месячный</b> — автоматически 1-го числа 09:00 МСК (итог за прошедший месяц).\n\n"
         f"Отчёты уходят в канал «Сигнал ТМ»: {target}\n\n"
@@ -699,6 +701,10 @@ async def _send_report(bot, text: str):
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+async def send_daily_report(bot):
+    return await _send_report(bot, reports.build_daily_text())
 
 
 async def send_weekly_report(bot):
@@ -756,6 +762,16 @@ async def _report_scheduler(app):
     while True:
         try:
             now = datetime.now(MSK)
+            # Дневной: каждый день, начиная с 09:00 МСК (за прошедший день).
+            if now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")          # дата этого дня
+                if database.get_report_marker("daily") != marker:
+                    ok, err = await send_daily_report(app.bot)
+                    if ok:
+                        database.set_report_marker("daily", marker)
+                        print(f"[REPORT] daily sent for {marker}")
+                    else:
+                        print(f"[REPORT] daily NOT sent: {err}")
             # Недельный: понедельник, начиная с 09:00 МСК.
             if now.weekday() == 0 and now.hour >= 9:
                 marker = now.strftime("%Y-%m-%d")          # дата этого понедельника
@@ -2413,6 +2429,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "reports":
         await q.edit_message_text(reports_text(), parse_mode="HTML", reply_markup=reports_kb())
+
+    elif data == "rep_day":
+        text = reports.build_daily_text()
+        ok, err = await send_daily_report(ctx.bot)
+        if ok:
+            head = f"✅ Дневной отчёт отправлен в канал. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=reports_kb())
 
     elif data in ("rep_week", "rep_month"):
         weekly = data == "rep_week"

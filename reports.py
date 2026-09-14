@@ -64,6 +64,19 @@ def last_month_range(today: date) -> tuple[date, date]:
 
 # --- сборка текстов --------------------------------------------------------
 
+def build_daily_text(now: datetime | None = None, day: date | None = None) -> str:
+    """Дневной отчёт IPBL за один день (по умолчанию — вчера, как при авто-отправке
+    в 09:00). Формат: заголовок с датой, счётчики исходов ✅/✖️/♻️, прибыль в %%."""
+    now = now or datetime.now(MSK)
+    day = day or (now.date() - timedelta(days=1))
+    st = database.daily_stats(day.isoformat())
+    return "\n".join([
+        f"Статистика стратегии IPBL за {day.strftime('%d.%m.%Y')}",
+        f"{st['wins']}✅/{st['losses']}✖️/{st['pushes']}♻️",
+        f"Прибыль составила {_pct(st['profit']):.2f}%",
+    ])
+
+
 def build_weekly_text(now: datetime | None = None) -> str:
     now = now or datetime.now(MSK)
     start, end = last_week_range(now.date())
