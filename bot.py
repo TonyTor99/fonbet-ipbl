@@ -32,6 +32,8 @@ import cyber_collector_db
 import export_cyber
 import nhl_collector_db
 import export_nhl
+import cage_collector_db
+import export_cage
 import prime_db
 import prime_signals
 import sh_pair_db
@@ -53,11 +55,13 @@ LOG_FILE = DIR / "parser.log"
 SH_LOG_FILE = DIR / "sh_parser.log"
 CYBER_LOG_FILE = DIR / "cyber_parser.log"
 NHL_LOG_FILE = DIR / "nhl_parser.log"
+CAGE_LOG_FILE = DIR / "cage_parser.log"
 MSK = timezone(timedelta(hours=3))
 _proc: subprocess.Popen | None = None
 _sh_proc: subprocess.Popen | None = None
 _cyber_proc: subprocess.Popen | None = None
 _nhl_proc: subprocess.Popen | None = None
+_cage_proc: subprocess.Popen | None = None
 
 # Веб-панель fonbet-dashboard (on-demand systemd-сервис на этом же VPS)
 PANEL_SERVICE = "fonbet-dashboard"
@@ -196,6 +200,38 @@ def stop_nhl_parser():
     subprocess.run(["pkill", "-f", "nhl_parser.py"], capture_output=True)
 
 
+def cage_parser_running() -> bool:
+    if _cage_proc is not None and _cage_proc.poll() is None:
+        return True
+    try:
+        r = subprocess.run(["pgrep", "-f", "cage_parser.py"], capture_output=True, timeout=2)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def start_cage_parser():
+    """Запускает cage_parser.py (IPBL CAGE Division) subprocess'ом, если не запущен."""
+    global _cage_proc
+    if cage_parser_running():
+        return
+    f = open(CAGE_LOG_FILE, "a")
+    _cage_proc = subprocess.Popen([sys.executable, "-u", str(DIR / "cage_parser.py")],
+                                  cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
+
+
+def stop_cage_parser():
+    global _cage_proc
+    if _cage_proc and _cage_proc.poll() is None:
+        _cage_proc.terminate()
+        try:
+            _cage_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _cage_proc.kill()
+        _cage_proc = None
+    subprocess.run(["pkill", "-f", "cage_parser.py"], capture_output=True)
+
+
 def panel_running() -> bool:
     """Запущен ли systemd-сервис веб-панели."""
     try:
@@ -302,6 +338,7 @@ def collectors_kb() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("🏒 Шорт-хоккей", callback_data="sh_collector")])
     rows.append([InlineKeyboardButton("🎮 Киберфутбол FC 26", callback_data="cyber_collector")])
     rows.append([InlineKeyboardButton("🏒 Кибер-хоккей NHL 26", callback_data="nhl_collector")])
+    rows.append([InlineKeyboardButton("🏀 IPBL CAGE Division", callback_data="cage_collector")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
     return InlineKeyboardMarkup(rows)
 
@@ -395,6 +432,26 @@ def confirm_nhl_reset_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Да, удалить", callback_data="nhl_reset_yes"),
         InlineKeyboardButton("❌ Отмена", callback_data="nhl_collector"),
+    ]])
+
+
+def cage_collector_kb() -> InlineKeyboardMarkup:
+    toggle = (InlineKeyboardButton("⏹ Остановить сборщик", callback_data="cage_stop")
+              if cage_parser_running() else
+              InlineKeyboardButton("▶️ Запустить сборщик", callback_data="cage_start"))
+    return InlineKeyboardMarkup([
+        [toggle],
+        [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="cage_export")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data="cage_collector")],
+        [InlineKeyboardButton("🗑 Сбросить БД CAGE", callback_data="cage_reset_ask")],
+        [InlineKeyboardButton("⬅️ К сборщикам", callback_data="collectors")],
+    ])
+
+
+def confirm_cage_reset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="cage_reset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="cage_collector"),
     ]])
 
 
@@ -888,6 +945,7 @@ def collectors_text() -> str:
         f"Шорт-хоккей: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}",
         f"Киберфутбол FC 26: {'🟢 работает' if cyber_parser_running() else '🔴 остановлен'}",
         f"Кибер-хоккей NHL 26: {'🟢 работает' if nhl_parser_running() else '🔴 остановлен'}",
+        f"IPBL CAGE Division: {'🟢 работает' if cage_parser_running() else '🔴 остановлен'}",
         "",
         "Лиги IPBL (сбор идёт вместе с парсером, каждая в свой файл):",
     ]
@@ -1021,6 +1079,31 @@ def nhl_collector_text() -> str:
             lines.append(f"• {e['team1']} — {e['team2']}: {e['marks']} стр · {fin}")
     else:
         lines.append("Пока пусто — ждём live-матч кибер-хоккея NHL 26.")
+    return "\n".join(lines)
+
+
+def cage_collector_text() -> str:
+    st = cage_collector_db.stats()
+    lines = [
+        "🏀 <b>Сборщик рынков IPBL CAGE Division</b>",
+        f"Сборщик: {'🟢 работает' if cage_parser_running() else '🔴 остановлен'}",
+        "Лига: Россия. IPBL. CAGE Division. 4х10",
+        "Рынки: тоталы + инд. тоталы (все линии) + 1X2 + фора.",
+        "Снимки: до матча + каждые 5 игровых минут (0-40, 4 четверти).",
+        "",
+        f"Матчей собрано: <b>{st['events']}</b>",
+        f"Строк (снимков): <b>{st['rows']}</b>",
+        f"С результатом: <b>{st['resolved']}</b>",
+        "",
+    ]
+    summ = cage_collector_db.events_summary(15)
+    if summ:
+        lines.append("Последние матчи:")
+        for e in summ:
+            fin = e["final_score"] if e["final_score"] else "идёт"
+            lines.append(f"• {e['team1']} — {e['team2']}: {e['marks']} стр · {fin}")
+    else:
+        lines.append("Пока пусто — ждём live-матч IPBL CAGE Division.")
     return "\n".join(lines)
 
 
@@ -2357,6 +2440,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"• Сборщик шорт-хоккея: {on(sh_parser_running())}",
                  f"• Сборщик киберфутбола FC 26: {on(cyber_parser_running())}",
                  f"• Сборщик кибер-хоккея NHL 26: {on(nhl_parser_running())}",
+                 f"• Сборщик IPBL CAGE Division: {on(cage_parser_running())}",
                  f"• Веб-панель: {on(panel_running())}",
                  "",
                  f"Активных сигналов (ждут итога): {active}",
@@ -2732,6 +2816,54 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         nhl_collector_db.clear_db()
         await q.edit_message_text("✅ БД кибер-хоккея очищена.\n\n" + nhl_collector_text(),
                                   parse_mode="HTML", reply_markup=nhl_collector_kb())
+
+    elif data == "cage_collector":
+        await q.edit_message_text(cage_collector_text(), parse_mode="HTML",
+                                  reply_markup=cage_collector_kb())
+
+    elif data == "cage_start":
+        start_cage_parser()
+        await q.edit_message_text("✅ Сборщик CAGE Division запущен.\n\n" + cage_collector_text(),
+                                  parse_mode="HTML", reply_markup=cage_collector_kb())
+
+    elif data == "cage_stop":
+        stop_cage_parser()
+        await q.edit_message_text("⏹ Сборщик CAGE Division остановлен.\n\n" + cage_collector_text(),
+                                  parse_mode="HTML", reply_markup=cage_collector_kb())
+
+    elif data == "cage_export":
+        st = cage_collector_db.stats()
+        if st["rows"] == 0:
+            await q.edit_message_text("🏀 Сборщик пока пуст — нечего выгружать.",
+                                      parse_mode="HTML", reply_markup=cage_collector_kb())
+            return
+        await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"cage_markets_{ts}.xlsx"
+        try:
+            export_cage.build(str(path))
+            with open(path, "rb") as fp:
+                await ctx.bot.send_document(
+                    chat_id=q.message.chat_id, document=fp, filename=path.name,
+                    caption=f"🏀 Рынки IPBL CAGE Division · матчей {st['events']} · строк {st['rows']}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, cage_collector_text(),
+                                   parse_mode="HTML", reply_markup=cage_collector_kb())
+
+    elif data == "cage_reset_ask":
+        await q.edit_message_text("⚠️ <b>Удалить все снимки CAGE Division из БД?</b>\nОтменить нельзя.",
+                                  parse_mode="HTML", reply_markup=confirm_cage_reset_kb())
+
+    elif data == "cage_reset_yes":
+        cage_collector_db.clear_db()
+        await q.edit_message_text("✅ БД CAGE Division очищена.\n\n" + cage_collector_text(),
+                                  parse_mode="HTML", reply_markup=cage_collector_kb())
 
     elif data == "chats":
         ctx.user_data.pop("await", None)
@@ -4273,6 +4405,7 @@ def main():
     sh_collector_db.init_db()
     cyber_collector_db.init_db()
     nhl_collector_db.init_db()
+    cage_collector_db.init_db()
     # Подчищаем «зависшие» парсеры от прошлого инстанса: при рестарте сервиса они
     # умирают не мгновенно, и pgrep внутри start_parser() видит их как живые →
     # запуск пропускается (гонка, из-за которой парсеры не поднимались). Форс-kill
@@ -4281,12 +4414,14 @@ def main():
     subprocess.run(["pkill", "-9", "-f", "sh_parser.py"], capture_output=True)
     subprocess.run(["pkill", "-9", "-f", "cyber_parser.py"], capture_output=True)
     subprocess.run(["pkill", "-9", "-f", "nhl_parser.py"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", "cage_parser.py"], capture_output=True)
     time.sleep(1.5)
     # Автозапуск парсеров при старте бота (в т.ч. после рестарта сервиса).
     start_parser()
     start_sh_parser()
     start_cyber_parser()
     start_nhl_parser()
+    start_cage_parser()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
     app = (Application.builder().token(BOT_TOKEN).request(request)
