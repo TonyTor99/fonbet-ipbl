@@ -14,6 +14,7 @@ from datetime import datetime, time as dtime, timezone, timedelta
 
 import database
 import tg_notify
+import vk_notify
 from config import (STRATEGIES, KF_MIN, KF_MAX, STAKE)
 
 log = logging.getLogger("signals")
@@ -297,6 +298,12 @@ def _store_and_send(sig: dict, render_fn, muted: bool = False):
     elif chat_id is not None:
         sig["status"] = "sent" if sig["strategy"] != "prime_info" else "info"
         sig["message_id"] = tg_notify.send(chat_id, render_fn(sig))
+    # VK — отдельный канал (только первичный сигнал, без правки итога). Не шлём
+    # выключенные лиги (muted); от наличия TG-чата не зависим.
+    if not muted:
+        _vk_peer = database.get_vk_peer(sig["strategy"])
+        if _vk_peer is not None:
+            vk_notify.send(_vk_peer, render_fn(sig))
     sid = database.insert_signal(sig)
     if sid is None:
         log.info("dup skipped %s ev=%s", sig["strategy"], sig["event_id"])

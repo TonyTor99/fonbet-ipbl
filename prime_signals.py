@@ -20,6 +20,7 @@ import collector
 import database
 import prime_db
 import tg_notify
+import vk_notify
 from config import PRIME_STRAT_CHAT, PRIME_STRAT_CODE_TM, PRIME_MARKETS, STAKE
 
 log = logging.getLogger("prime_signals")
@@ -159,6 +160,10 @@ def _fire(rule: dict, state: dict, line: float, odds: float):
     }
     if chat_id is not None:
         sig["message_id"] = tg_notify.send(chat_id, render_signal(sig))
+    # VK — отдельный канал (только первичный сигнал, без правки итога).
+    _vk_peer = database.get_vk_peer(chat_code)
+    if _vk_peer is not None:
+        vk_notify.send(_vk_peer, render_signal(sig))
     sid = prime_db.insert_signal(sig)
     if sid is None:
         log.info("dup skipped rule=%s ev=%s", rule["id"], state["event_id"])

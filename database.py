@@ -167,6 +167,13 @@ def init_db():
             marker     TEXT,                        -- за какой период уже отправлен ('YYYY-MM-DD' понедельника / 'YYYY-MM')
             updated_at TEXT
         );
+
+        -- Глобальные настройки (key/value). Сейчас используется для VK: 'vk_token'
+        -- (user-токен для messages.send) и 'vk_enabled' ('1'/'0' — общий выключатель).
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        );
     """)
     conn.commit()
     # миграции для уже существующей БД
@@ -184,6 +191,7 @@ def init_db():
         ("windows", "ALTER TABLE bot_config ADD COLUMN windows TEXT"),
         ("threshold", "ALTER TABLE bot_config ADD COLUMN threshold REAL"),
         ("lc_threshold", "ALTER TABLE league_config ADD COLUMN threshold REAL"),
+        ("vk_peer_id", "ALTER TABLE bot_config ADD COLUMN vk_peer_id INTEGER"),
     ]:
         try:
             conn.execute(ddl)
@@ -215,6 +223,64 @@ def set_chat_id(strategy: str, chat_id: int):
     )
     conn.commit()
     conn.close()
+
+
+# --- VK: peer_id стратегии (в bot_config) + токен/выключатель (в app_settings) ---
+
+def get_vk_peer(strategy: str) -> int | None:
+    """VK peer_id для стратегии (куда дублировать сигнал). None = VK не задан."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT vk_peer_id FROM bot_config WHERE strategy=?", (strategy,)).fetchone()
+    conn.close()
+    return row["vk_peer_id"] if row else None
+
+
+def set_vk_peer(strategy: str, peer_id: int | None):
+    """Задать/очистить (peer_id=None) VK-беседу стратегии."""
+    conn = _conn()
+    _ensure_config_row(conn, strategy)
+    conn.execute(
+        "UPDATE bot_config SET vk_peer_id=?, updated_at=? WHERE strategy=?",
+        (peer_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), strategy),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_setting(key: str, default: str = "") -> str:
+    conn = _conn()
+    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str):
+    conn = _conn()
+    conn.execute(
+        "INSERT INTO app_settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    conn.commit()
+    conn.close()
+
+
+def get_vk_token() -> str:
+    """Актуальный VK-токен: override из БД (задан ботом) или фолбэк из .env."""
+    from config import VK_USER_TOKEN
+    return get_setting("vk_token", "") or VK_USER_TOKEN
+
+
+def set_vk_token(token: str):
+    set_setting("vk_token", token.strip())
+
+
+def get_vk_enabled() -> bool:
+    """Глобальный выключатель VK-доставки (по умолчанию включено)."""
+    return get_setting("vk_enabled", "1") == "1"
+
+
+def set_vk_enabled(enabled: bool):
+    set_setting("vk_enabled", "1" if enabled else "0")
 
 
 def get_windows(strategy: str) -> list[tuple[str, str]]:

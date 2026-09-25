@@ -16,6 +16,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
 from telegram.request import HTTPXRequest
 
 import database
+import vk_notify
 import signals
 import reports
 import collector_db
@@ -264,6 +265,7 @@ def main_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🤖 Статистика стратегий", callback_data="stats")],
         [InlineKeyboardButton("📦 Сборщики", callback_data="collectors")],
         [InlineKeyboardButton("🎯 Стратегии", callback_data="strats")],
+        [InlineKeyboardButton("🆚 Настройки VK", callback_data="vk")],
         [panel_btn],
     ])
 
@@ -288,6 +290,103 @@ def strats_kb() -> InlineKeyboardMarkup:
 
 def strats_text() -> str:
     return "🎯 <b>Стратегии</b>\nВыбери стратегию для настройки и статистики:"
+
+
+# --- хаб «Настройки VK»: дублирование сигналов в ВКонтакте ------------------
+# Доп. канал: первичный сигнал стратегии уходит в её VK-беседу (без правки итога).
+# peer_id хранится на стратегию (bot_config.vk_peer_id), токен/выключатель — в
+# app_settings. Порядок и имена — как у 6 стратегий в хабе «Стратегии».
+
+VK_STRATS = [
+    ("signal_tm", "Сигнал ТМ"),
+    (PRIME_STRAT_CODE_TM, "Prime ТМ"),
+    (PRIME_STRAT_CODE_IT1, "Prime ИТМ1"),
+    (SH_STRAT_CODE, "Шорт-хоккей"),
+    (SH_TOTAL_STRAT_CODE, "ШХ тотал"),
+    (SH_PAIR_STRAT_CODE, "ШХ Пары"),
+    (PQ_STRAT_CODE, "Четверти Pro Жен"),
+]
+
+
+def _vk_mask_token(t: str) -> str:
+    if not t:
+        return "— не задан —"
+    return f"{t[:6]}…{t[-4:]}" if len(t) > 12 else "•" * len(t)
+
+
+def _vk_strat_name(code: str) -> str:
+    for c, n in VK_STRATS:
+        if c == code:
+            return n
+    return code
+
+
+def vk_text() -> str:
+    enabled = database.get_vk_enabled()
+    token = database.get_vk_token()
+    lines = [
+        "🆚 <b>Настройки VK</b>",
+        "Дублирование сигналов в ВКонтакте (только первичный сигнал, без правки итога).",
+        "",
+        f"Статус: {'✅ включено' if enabled else '⛔ выключено'}",
+        f"Токен: <code>{_vk_mask_token(token)}</code>",
+        "",
+        "peer_id по стратегиям:",
+    ]
+    for code, name in VK_STRATS:
+        peer = database.get_vk_peer(code)
+        lines.append(f"• {name}: {('<code>' + str(peer) + '</code>') if peer is not None else '—'}")
+    return "\n".join(lines)
+
+
+def vk_kb() -> InlineKeyboardMarkup:
+    enabled = database.get_vk_enabled()
+    rows = [
+        [InlineKeyboardButton("⛔ Выключить VK" if enabled else "✅ Включить VK",
+                              callback_data="vk_toggle")],
+        [InlineKeyboardButton("🔑 VK-токен", callback_data="vk_tok")],
+        [InlineKeyboardButton("🆔 VK-беседы (peer_id)", callback_data="vk_chats")],
+    ]
+    for code, name in VK_STRATS:
+        peer = database.get_vk_peer(code)
+        mark = "✅" if peer is not None else "➖"
+        rows.append([InlineKeyboardButton(f"{mark} {name}", callback_data=f"vkstr:{code}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="back")])
+    return InlineKeyboardMarkup(rows)
+
+
+def vk_tok_text() -> str:
+    token = database.get_vk_token()
+    src = "override из БД (задан ботом)" if database.get_setting("vk_token", "") else "фолбэк из .env"
+    return ("🔑 <b>VK-токен</b> (user-токен для messages.send)\n\n"
+            f"Текущий: <code>{_vk_mask_token(token)}</code>\n"
+            f"Источник: {src}\n\n"
+            "Кнопкой ниже пришли новый токен ответным сообщением.")
+
+
+def vk_tok_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Заменить токен", callback_data="vk_tokset")],
+        [InlineKeyboardButton("⬅️ К настройкам VK", callback_data="vk")],
+    ])
+
+
+def vk_strat_text(code: str) -> str:
+    peer = database.get_vk_peer(code)
+    return (f"🆚 <b>{_vk_strat_name(code)} · VK</b>\n\n"
+            f"peer_id: {('<code>' + str(peer) + '</code>') if peer is not None else '— не задан —'}\n\n"
+            "Сигналы этой стратегии дублируются в указанную VK-беседу "
+            "(беседа: обычно 2000000000+id; сообщество: отрицательный id).")
+
+
+def vk_strat_kb(code: str) -> InlineKeyboardMarkup:
+    peer = database.get_vk_peer(code)
+    rows = [[InlineKeyboardButton("✏️ Задать peer_id", callback_data=f"vkset:{code}")]]
+    if peer is not None:
+        rows.append([InlineKeyboardButton("🧪 Тест-сообщение", callback_data=f"vktest:{code}")])
+        rows.append([InlineKeyboardButton("🗑 Очистить peer_id", callback_data=f"vkclr:{code}")])
+    rows.append([InlineKeyboardButton("⬅️ К настройкам VK", callback_data="vk")])
+    return InlineKeyboardMarkup(rows)
 
 
 # --- хаб «Сборщики»: все сборщики в одном месте ----------------------------
@@ -2383,6 +2482,75 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("sp_view", None)
         await q.edit_message_text(strats_text(), parse_mode="HTML", reply_markup=strats_kb())
 
+    elif data == "vk":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(vk_text(), parse_mode="HTML", reply_markup=vk_kb())
+
+    elif data == "vk_toggle":
+        database.set_vk_enabled(not database.get_vk_enabled())
+        await q.edit_message_text(vk_text(), parse_mode="HTML", reply_markup=vk_kb())
+
+    elif data == "vk_tok":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(vk_tok_text(), parse_mode="HTML", reply_markup=vk_tok_kb())
+
+    elif data == "vk_tokset":
+        ctx.user_data["await"] = ("vk_token", None)
+        await q.edit_message_text(
+            "🔑 Пришли ответным сообщением новый VK user-токен.\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data == "vk_chats":
+        try:
+            convs = await asyncio.to_thread(vk_notify.list_conversations)
+        except Exception as e:
+            await q.edit_message_text(
+                f"🆔 VK-беседы\nНе удалось получить список: {e}",
+                parse_mode="HTML", reply_markup=vk_tok_kb())
+            return
+        body = ("\n".join(f"• {c['title']} — peer_id: <code>{c['peer_id']}</code>"
+                          for c in convs[:50]) if convs else "Бесед не найдено.")
+        await q.edit_message_text(
+            "🆔 <b>VK-беседы и чаты</b> (бери peer_id для привязки):\n\n" + body,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Обновить", callback_data="vk_chats")],
+                [InlineKeyboardButton("⬅️ К настройкам VK", callback_data="vk")]]))
+
+    elif data.startswith("vkstr:"):
+        code = data.split(":", 1)[1]
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(vk_strat_text(code), parse_mode="HTML",
+                                  reply_markup=vk_strat_kb(code))
+
+    elif data.startswith("vkset:"):
+        code = data.split(":", 1)[1]
+        ctx.user_data["await"] = ("vk_peer", code)
+        await q.edit_message_text(
+            f"Пришли <b>peer_id</b> VK-беседы для <b>{_vk_strat_name(code)}</b>.\n"
+            f"Беседа: обычно <code>2000000000+id</code>; сообщество — отрицательный id.\n"
+            f"Список — кнопка «VK-беседы».\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("vkclr:"):
+        code = data.split(":", 1)[1]
+        database.set_vk_peer(code, None)
+        await q.edit_message_text(vk_strat_text(code), parse_mode="HTML",
+                                  reply_markup=vk_strat_kb(code))
+
+    elif data.startswith("vktest:"):
+        code = data.split(":", 1)[1]
+        peer = database.get_vk_peer(code)
+        if peer is None:
+            await q.answer("peer_id не задан", show_alert=True)
+        else:
+            mid = await asyncio.to_thread(
+                vk_notify.send, peer,
+                f"🧪 Тест VK · {_vk_strat_name(code)}\n"
+                f"Сигналы этой стратегии будут приходить сюда.")
+            await q.answer("✅ Отправлено в VK" if mid is not None
+                           else "❌ Не удалось (проверь токен, включение VK и peer_id)",
+                           show_alert=True)
+
     elif data == "stats":
         await q.edit_message_text(stats_menu_text(), parse_mode="HTML", reply_markup=stats_kb())
 
@@ -3900,6 +4068,25 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ {STRATEGIES.get(code, code)} → chat_id <code>{cid}</code>.",
             parse_mode="HTML", reply_markup=main_kb())
+
+    elif kind == "vk_token":
+        database.set_vk_token(raw)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ VK-токен сохранён: <code>{_vk_mask_token(database.get_vk_token())}</code>.",
+            parse_mode="HTML", reply_markup=vk_kb())
+
+    elif kind == "vk_peer":
+        try:
+            peer = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ peer_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_vk_peer(code, peer)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ {_vk_strat_name(code)} → VK peer_id <code>{peer}</code>.",
+            parse_mode="HTML", reply_markup=vk_strat_kb(code))
 
     elif kind == "lthr":
         try:

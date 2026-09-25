@@ -23,6 +23,7 @@ import collector_periods
 import database
 import pq_db
 import tg_notify
+import vk_notify
 from config import (PQ_STRAT_CODE, PQ_SIDES, PQ_QUARTER_MIN, STAKE)
 
 log = logging.getLogger("pq_signals")
@@ -167,6 +168,10 @@ def _fire(rule: dict, state: dict, minute: int, quarter: int, line: float,
     if chat_id is not None:
         sig["message_id"] = tg_notify.send(chat_id, render_signal(sig))
         sig["status"] = "sent"
+    # VK — отдельный канал (только первичный сигнал, без правки итога).
+    _vk_peer = database.get_vk_peer(PQ_STRAT_CODE)
+    if _vk_peer is not None:
+        vk_notify.send(_vk_peer, render_signal(sig))
     sid = pq_db.insert_signal(sig)
     if sid is None:
         log.info("dup skipped rule=%s ev=%s min=%s", rule["id"], state["event_id"], minute)

@@ -17,6 +17,7 @@ from datetime import datetime, timezone, timedelta
 
 import database
 import tg_notify
+import vk_notify
 from config import SH_STRAT_CODE, sh_short_league, sh_league_key
 
 log = logging.getLogger("sh_signals")
@@ -154,6 +155,10 @@ def _fire(rule: dict, state: dict, odds: float):
     if chat_id is not None:
         sig["message_id"] = tg_notify.send(chat_id, render_signal(sig))
         sig["status"] = "sent"
+    # VK — отдельный канал (только первичный сигнал, без правки итога).
+    _vk_peer = database.get_vk_peer(SH_STRAT_CODE)
+    if _vk_peer is not None:
+        vk_notify.send(_vk_peer, render_signal(sig))
     sid = database.sh_insert_signal(sig)
     if sid is None:
         log.info("dup skipped rule=%s ev=%s", rule["id"], state["event_id"])
