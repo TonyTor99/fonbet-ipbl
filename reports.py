@@ -19,6 +19,7 @@ import database
 import prime_db
 import sh_pair_db
 import pq_db
+import cage_strat_db
 from config import BANKROLL_START
 
 MSK = timezone(timedelta(hours=3))
@@ -242,6 +243,50 @@ def build_pq_monthly_text(now: datetime | None = None) -> str:
     total = pq_db.profit_total(start.isoformat(), end.isoformat())
     return "\n".join([
         PQ_HEADER,
+        GREETING,
+        f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+# ===========================================================================
+# Отчёты стратегии CAGE (отдельный источник — cage_strat_db, отдельный чат).
+# ===========================================================================
+CAGE_STRAT_HEADER = "Стратегия CAGE · ТМ"
+
+
+def build_cage_strat_daily_text(now: datetime | None = None, day: date | None = None) -> str:
+    now = now or datetime.now(MSK)
+    day = day or (now.date() - timedelta(days=1))
+    total = cage_strat_db.profit_total(day.isoformat(), day.isoformat())
+    return "\n".join([
+        CAGE_STRAT_HEADER,
+        GREETING,
+        f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+def build_cage_strat_weekly_text(now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_week_range(now.date())
+    by_day = cage_strat_db.profit_by_day(start.isoformat(), end.isoformat())
+    total = cage_strat_db.profit_total(start.isoformat(), end.isoformat())
+    lines = [
+        CAGE_STRAT_HEADER,
+        GREETING,
+        f"За прошедшую неделю прибыль составила {_pct(total):.2f}%",
+    ]
+    for i in range(7):
+        d = start + timedelta(days=i)
+        lines.append(_day_line(d, by_day.get(d.isoformat(), 0.0)))
+    return "\n".join(lines)
+
+
+def build_cage_strat_monthly_text(now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_month_range(now.date())
+    total = cage_strat_db.profit_total(start.isoformat(), end.isoformat())
+    return "\n".join([
+        CAGE_STRAT_HEADER,
         GREETING,
         f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
     ])

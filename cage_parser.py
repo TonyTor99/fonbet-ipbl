@@ -25,6 +25,8 @@ from typing import Optional
 import requests
 
 import cage_collector_db as db
+import cage_strat_db
+import cage_strat_signals
 from config import LINE_SERVERS, HEADERS, SCOPE_MARKET, MAX_WORKERS
 from cage_config import (SPORT_ID, LEAGUE_NAME, CAGE_POLL_INTERVAL,
                          QUARTER_TS,
@@ -370,6 +372,10 @@ def resolve(event_id: int, s1: int, s2: int):
 def _finalize(eid: int):
     s1, s2 = _last_score.get(eid, (0, 0))
     resolve(eid, s1, s2)
+    try:
+        cage_strat_signals.resolve(eid, s1, s2)
+    except Exception as e:
+        log.warning("cage_strat resolve err ev=%s: %s", eid, e)
     _known.pop(eid, None)
     _last_score.pop(eid, None)
     _last_comment.pop(eid, None)
@@ -453,6 +459,10 @@ def run_cycle() -> list[dict]:
             process(state, api_map.get(eid))
         except Exception as e:
             log.warning("process err ev=%s: %s", eid, e)
+        try:
+            cage_strat_signals.process_match(state, api_map.get(eid))
+        except Exception as e:
+            log.warning("cage_strat err ev=%s: %s", eid, e)
         results.append(state)
     return results
 
@@ -496,6 +506,7 @@ def main():
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(name)s] %(message)s", datefmt="%H:%M:%S")
     db.init_db()
+    cage_strat_db.init_db()   # БД стратегии CAGE (сигналы) — на случай автономного запуска
     if args.reset:
         db.clear_db()
         print("БД CAGE Division очищена.")
