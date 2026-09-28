@@ -45,6 +45,9 @@ import export_pq
 import cage_strat_db
 import cage_strat_signals
 import export_cage_strat
+import prime_women_db
+import prime_women_signals
+import export_prime_women
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES,
                     SH_STRAT_CODE, SH_STRAT_LEAGUES, SH_TOTAL_STRAT_CODE,
@@ -52,7 +55,7 @@ from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     PRIME_STRAT_CHAT, PRIME_MARKETS, sh_short_league,
                     SH_PAIR_STRAT_CODE, SH_PAIR_SIDES, SH_PAIR_PREMATCH,
                     PQ_STRAT_CODE, PQ_SIDES,
-                    CAGE_STRAT_CODE, CAGE_STRAT_PREMATCH)
+                    CAGE_STRAT_CODE, CAGE_STRAT_PREMATCH, PW_STRAT_CODE)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -323,6 +326,7 @@ def strats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="spstrat")],
         [InlineKeyboardButton("🏀 Четверти Pro Жен", callback_data="pqstrat")],
         [InlineKeyboardButton("🏀 Стратегия CAGE", callback_data="csstrat")],
+        [InlineKeyboardButton("🏀 Стратегия Prime Ж", callback_data="pwstrat")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
@@ -518,6 +522,7 @@ def stats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏒 Стратегия ШХ пары", callback_data="stats_shp")],
         [InlineKeyboardButton("🏀 Четверти Pro Жен", callback_data="stats_pq")],
         [InlineKeyboardButton("🏀 Стратегия CAGE", callback_data="stats_cs")],
+        [InlineKeyboardButton("🏀 Стратегия Prime Ж", callback_data="stats_pw")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
@@ -827,6 +832,18 @@ async def _send_cage_strat_report(bot, text: str):
         return False, str(e)
 
 
+async def _send_pw_report(bot, text: str):
+    """Публикует отчёт стратегии Prime Ж в её чат. (ok, err_text)."""
+    cid = database.get_chat_id(PW_STRAT_CODE)
+    if cid is None:
+        return False, "chat_id Prime Ж не задан (задай в «🏀 Стратегия Prime Ж → Чат стратегии»)."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 # --- планировщик отчётов (без JobQueue: лёгкий asyncio-таск) ----------------
 # JobQueue у PTB требует extra [job-queue]; чтобы не тянуть зависимость на VPS,
 # проверяем время сами раз в минуту. Маркер уже отправленного периода лежит в БД
@@ -977,6 +994,30 @@ async def _report_scheduler(app):
                     if ok:
                         database.set_report_marker("cage_strat_monthly", marker)
                         print(f"[REPORT] cage monthly sent for {marker}")
+            # Prime Ж: дневной каждый день, недельный (Пн), месячный (1-е) — 09:00 МСК.
+            if now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("pw_daily") != marker:
+                    ok, err = await _send_pw_report(app.bot, reports.build_pw_daily_text(now))
+                    if ok:
+                        database.set_report_marker("pw_daily", marker)
+                        print(f"[REPORT] pw daily sent for {marker}")
+                    else:
+                        print(f"[REPORT] pw daily NOT sent: {err}")
+            if now.weekday() == 0 and now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("pw_weekly") != marker:
+                    ok, err = await _send_pw_report(app.bot, reports.build_pw_weekly_text(now))
+                    if ok:
+                        database.set_report_marker("pw_weekly", marker)
+                        print(f"[REPORT] pw weekly sent for {marker}")
+            if now.day == 1 and now.hour >= 9:
+                marker = now.strftime("%Y-%m")
+                if database.get_report_marker("pw_monthly") != marker:
+                    ok, err = await _send_pw_report(app.bot, reports.build_pw_monthly_text(now))
+                    if ok:
+                        database.set_report_marker("pw_monthly", marker)
+                        print(f"[REPORT] pw monthly sent for {marker}")
         except Exception as e:
             print(f"[REPORT sched error] {e}")
         await asyncio.sleep(60)
@@ -2446,6 +2487,287 @@ def csteams_kb(rid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+# --- стратегия Prime ЖЕНЩИНЫ (сигнал ТМ, минута, по парам) ------------------
+
+PW_PAGE = 8   # пар на страницу в экране галочек
+
+
+def parse_pw_minute(raw: str):
+    """Игровая минута сигнала: целое ≥ 0. None при ошибке."""
+    try:
+        m = int(raw.strip())
+    except ValueError:
+        return None
+    return m if m >= 0 else None
+
+
+def pwstrat_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Наборы (минута + пары)", callback_data="pwrules")],
+        [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="pwchat")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="pwstats")],
+        [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="pwreports")],
+        [InlineKeyboardButton("📥 Excel", callback_data="pwexport")],
+        [InlineKeyboardButton("🗑 Сброс сигналов", callback_data="pwreset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
+    ])
+
+
+def _pw_chat_line() -> str:
+    cid = database.get_chat_id(PW_STRAT_CODE)
+    val = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
+    return f"Чат отправки: {val}"
+
+
+def pwstrat_text() -> str:
+    rules = prime_women_db.get_rules()
+    on = sum(1 for r in rules if r["enabled"])
+    return (
+        "🏀 <b>Стратегия Prime Ж (ТМ)</b>\n"
+        f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}\n"
+        f"{_pw_chat_line()}\n"
+        f"Наборов: {len(rules)} (включено {on})\n\n"
+        "Набор = минута + галочки пар. Можно несколько наборов с разными минутами. "
+        "На заданной игровой минуте матча Prime жен по отмеченной паре шлётся сигнал "
+        "ТМ по текущей крайней линии тотала.\n"
+        "⚠️ Список пар берётся из сборщика Prime жен (prime_women_markets.db) — он должен собирать матчи."
+    )
+
+
+def pw_rule_label(rule: dict) -> str:
+    mark = "✅" if rule["enabled"] else "🚫"
+    return f"{mark} ТМ · мин {rule['minute']} · пар {prime_women_db.count_pairs(rule['id'])}"
+
+
+def pwrules_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(pw_rule_label(r), callback_data=f"pwrule:{r['id']}")]
+            for r in prime_women_db.get_rules()]
+    rows.append([InlineKeyboardButton("➕ Добавить набор", callback_data="pwadd")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pwstrat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pwrules_text() -> str:
+    rules = prime_women_db.get_rules()
+    lines = ["📋 <b>Наборы стратегии Prime Ж</b>", ""]
+    if not rules:
+        lines.append("Пока пусто. Нажми «➕ Добавить набор».")
+    else:
+        lines.append("Тап по набору — минута/пары/удаление.")
+    return "\n".join(lines)
+
+
+def pwrule_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle, callback_data=f"pwtgl:{rid}")],
+        [InlineKeyboardButton(f"✏️ Минута ({rule['minute']})", callback_data=f"pwmin:{rid}")],
+        [InlineKeyboardButton(f"☑️ Пары (отмечено {prime_women_db.count_pairs(rid)})",
+                              callback_data=f"pwpairs:{rid}")],
+        [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"pwdel_ask:{rid}")],
+        [InlineKeyboardButton("⬅️ К наборам", callback_data="pwrules")],
+    ])
+
+
+def pwrule_text(rule: dict) -> str:
+    st = prime_women_db.rule_stats(rule["id"])
+    lines = [
+        "🏀 <b>Набор Prime Ж · ТМ</b>",
+        f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
+        "",
+        f"⏱ Минута сигнала: <b>{rule['minute']}</b>",
+        f"🎯 Рынок: <b>ТМ (крайняя линия)</b>",
+        f"☑️ Отмечено пар: <b>{prime_women_db.count_pairs(rule['id'])}</b>",
+        "",
+        "<b>Статистика</b>",
+        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
+    ]
+    if st["wins"] + st["losses"] > 0:
+        lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+        lines.append(f"Прибыль: {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def confirm_pwdel_kb(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"pwdel_yes:{rule_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"pwrule:{rule_id}"),
+    ]])
+
+
+def confirm_pwreset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="pwreset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="pwstrat"),
+    ]])
+
+
+def pwreports_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 День", callback_data="pwrep:day"),
+         InlineKeyboardButton("неделя", callback_data="pwrep:week"),
+         InlineKeyboardButton("месяц", callback_data="pwrep:month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="pwstrat")],
+    ])
+
+
+def pwreports_text() -> str:
+    return (
+        "📈 <b>Отчёты стратегии Prime Ж</b>\n\n"
+        "Процент прибыли — от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
+        "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
+        "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
+        f"{_pw_chat_line()}\n\n"
+        "Кнопки ниже — отправить вручную сейчас."
+    )
+
+
+def prime_women_stats_section() -> str:
+    """Блок статистики стратегии Prime Ж (для общего экрана и экрана статистики)."""
+    cid = database.get_chat_id(PW_STRAT_CODE)
+    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRIME Ж</b>  "
+             f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
+    rules = prime_women_db.get_rules()
+    if not rules:
+        lines.append("Наборов ещё нет — добавь в «🏀 Стратегия Prime Ж».")
+        return "\n".join(lines)
+    tot = prime_women_db.overall_stats()
+    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+                 f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
+    if tot["wins"] + tot["losses"] > 0:
+        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}")
+    for r in rules:
+        st = prime_women_db.rule_stats(r["id"])
+        if st["signals"] == 0:
+            continue
+        lines += ["", f"• ТМ · мин {r['minute']} · пар {prime_women_db.count_pairs(r['id'])}: "
+                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
+        if st["wins"] + st["losses"] > 0:
+            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def pwstats_text() -> str:
+    return _bal_line() + prime_women_stats_section()
+
+
+# --- экран галочек пар Prime Ж (с поиском/фильтром/пагинацией) --------------
+
+def _pw_view(ctx, rid: int) -> dict:
+    v = ctx.user_data.get("pw_view")
+    if not v or v.get("rid") != rid:
+        v = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        ctx.user_data["pw_view"] = v
+    return v
+
+
+def _pw_filtered_pairs(view: dict) -> list[tuple[str, str]]:
+    pairs = prime_women_db.distinct_pairs()
+    f = view.get("filter")
+    if f == "team":
+        t = view["team"].lower()
+        pairs = [p for p in pairs if p[0].lower() == t or p[1].lower() == t]
+    elif f == "search":
+        s = view["search"].lower()
+        pairs = [p for p in pairs if s in p[0].lower() or s in p[1].lower()]
+    elif f == "selected":
+        sel = prime_women_db.get_rule_pairs(view["rid"])
+        pairs = [p for p in pairs if p in sel]
+    return pairs
+
+
+def _pw_filter_name(view: dict) -> str:
+    f = view.get("filter")
+    if f == "team":
+        return f"команда «{view['team']}»"
+    if f == "search":
+        return f"поиск «{view['search']}»"
+    if f == "selected":
+        return "только отмеченные"
+    return "все пары"
+
+
+def pwpairs_text(ctx, rid: int) -> str:
+    view = _pw_view(ctx, rid)
+    rule = prime_women_db.get_rule(rid)
+    pairs = _pw_filtered_pairs(view)
+    total = len(prime_women_db.distinct_pairs())
+    sel = prime_women_db.count_pairs(rid)
+    lines = [
+        f"☑️ <b>Пары набора · ТМ · мин {rule['minute'] if rule else '?'}</b>",
+        f"Отмечено: <b>{sel}</b> из {total} пар",
+        f"Фильтр: {_pw_filter_name(view)} — найдено {len(pairs)}",
+        "",
+        "Тап по паре — поставить/снять ✅.",
+    ]
+    if not pairs:
+        lines.append("\nПод фильтр ничего не попало (или сборщик Prime жен ещё пуст).")
+    return "\n".join(lines)
+
+
+def pwpairs_kb(ctx, rid: int) -> InlineKeyboardMarkup:
+    view = _pw_view(ctx, rid)
+    pairs = _pw_filtered_pairs(view)
+    sel = prime_women_db.get_rule_pairs(rid)
+
+    pages = max(1, (len(pairs) + PW_PAGE - 1) // PW_PAGE)
+    page = max(0, min(view["page"], pages - 1))
+    view["page"] = page
+    start = page * PW_PAGE
+    chunk = pairs[start:start + PW_PAGE]
+
+    rows = []
+    for pos, (a, b) in enumerate(chunk, start=start):
+        mark = "✅" if (a, b) in sel else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {prime_women_db.pair_label(a, b)}",
+                                          callback_data=f"pwtog:{pos}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data="pwpg:prev"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="pwnop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data="pwpg:next"))
+    if len(nav) > 1:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton("🔤 По команде", callback_data="pwflt_team"),
+        InlineKeyboardButton("🔍 Поиск", callback_data="pwflt_search"),
+    ])
+    sel_btn = ("❌ Снять фильтр" if view["filter"] else "☑️ Только отмеченные")
+    sel_cb = ("pwflt_none" if view["filter"] else "pwflt_sel")
+    rows.append([InlineKeyboardButton(sel_btn, callback_data=sel_cb)])
+    total_all = len(prime_women_db.distinct_pairs())
+    all_selected = total_all > 0 and prime_women_db.count_pairs(rid) >= total_all
+    glob_btn = ("🚫 Снять ВСЕ пары" if all_selected else "✅ Отметить ВСЕ пары")
+    glob_cb = ("pwallg_off" if all_selected else "pwallg_on")
+    rows.append([InlineKeyboardButton(glob_btn, callback_data=glob_cb)])
+    rows.append([
+        InlineKeyboardButton("✔️ Отметить (фильтр)", callback_data="pwall_on"),
+        InlineKeyboardButton("✖️ Снять (фильтр)", callback_data="pwall_off"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"pwrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pwteams_kb(rid: int) -> InlineKeyboardMarkup:
+    teams = prime_women_db.distinct_teams()
+    rows, row = [], []
+    for i, t in enumerate(teams):
+        row.append(InlineKeyboardButton(t, callback_data=f"pwteam:{i}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ К парам", callback_data=f"pwpairs:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
 # --- стратегия ЧЕТВЕРТИ Pro Жен (тотал ТБ/ТМ текущей четверти по парам) ------
 
 PQ_PAGE = 8   # пар на страницу в экране галочек
@@ -2801,7 +3123,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"• 🏀 Четверти Pro Ж: "
                  f"{_rule_strat_status(pq_db.get_rules(), PQ_STRAT_CODE, 'наборов')}",
                  f"• 🏀 Стратегия CAGE: "
-                 f"{_rule_strat_status(cage_strat_db.get_rules(), CAGE_STRAT_CODE, 'наборов')}"]
+                 f"{_rule_strat_status(cage_strat_db.get_rules(), CAGE_STRAT_CODE, 'наборов')}",
+                 f"• 🏀 Стратегия Prime Ж: "
+                 f"{_rule_strat_status(prime_women_db.get_rules(), PW_STRAT_CODE, 'наборов')}"]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
 
     elif data == "strats":
@@ -2809,6 +3133,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("pm_view", None)
         ctx.user_data.pop("sp_view", None)
         ctx.user_data.pop("cs_view", None)
+        ctx.user_data.pop("pw_view", None)
         await q.edit_message_text(strats_text(), parse_mode="HTML", reply_markup=strats_kb())
 
     elif data == "stats":
@@ -2834,6 +3159,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "stats_cs":
         await q.edit_message_text(csstats_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
+
+    elif data == "stats_pw":
+        await q.edit_message_text(pwstats_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
 
     elif data == "export_sig":
         await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
@@ -4347,6 +4675,252 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ Сигналы стратегии CAGE очищены.\n\n" + csstrat_text(),
                                   parse_mode="HTML", reply_markup=csstrat_kb())
 
+    # --- стратегия Prime Ж -------------------------------------------------
+    elif data == "pwstrat":
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("pw_view", None)
+        await q.edit_message_text(pwstrat_text(), parse_mode="HTML", reply_markup=pwstrat_kb())
+
+    elif data == "pwrules":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(pwrules_text(), parse_mode="HTML", reply_markup=pwrules_kb())
+
+    elif data == "pwadd":
+        ctx.user_data["await"] = ("pw_rule_new", None)
+        await q.edit_message_text(
+            "➕ <b>Новый набор Prime Ж · ТМ</b>\n\n"
+            "Пришли <b>игровую минуту</b> сигнала числом, например <code>15</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pwrule:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_women_db.get_rule(rid)
+        if not rule:
+            await q.edit_message_text(pwrules_text(), parse_mode="HTML", reply_markup=pwrules_kb())
+            return
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(pwrule_text(rule), parse_mode="HTML", reply_markup=pwrule_kb(rule))
+
+    elif data.startswith("pwtgl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        prime_women_db.toggle_rule(rid)
+        rule = prime_women_db.get_rule(rid)
+        if rule:
+            await q.edit_message_text(pwrule_text(rule), parse_mode="HTML", reply_markup=pwrule_kb(rule))
+
+    elif data.startswith("pwmin:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_women_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("pw_rule_edit", rid)
+        await q.edit_message_text(
+            f"✏️ <b>Минута сигнала</b>\nСейчас: {rule['minute']}\n\n"
+            "Пришли новую игровую минуту числом, например <code>15</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pwdel_ask:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_women_db.get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить набор?</b>\n{pw_rule_label(rule)}\n"
+            "Галочки пар набора тоже удалятся. Отменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_pwdel_kb(rid))
+
+    elif data.startswith("pwdel_yes:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        prime_women_db.delete_rule(rid)
+        await q.edit_message_text("✅ Набор удалён.\n\n" + pwrules_text(),
+                                  parse_mode="HTML", reply_markup=pwrules_kb())
+
+    # экран галочек пар Prime Ж
+    elif data.startswith("pwpairs:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not prime_women_db.get_rule(rid):
+            return
+        ctx.user_data.pop("await", None)
+        ctx.user_data["pw_view"] = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        await q.edit_message_text(pwpairs_text(ctx, rid), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, rid))
+
+    elif data.startswith("pwtog:"):
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        try:
+            pos = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pairs = _pw_filtered_pairs(view)
+        if not (0 <= pos < len(pairs)):
+            return
+        a, b = pairs[pos]
+        prime_women_db.toggle_pair(view["rid"], a, b)
+        await q.edit_message_text(pwpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, view["rid"]))
+
+    elif data in ("pwpg:prev", "pwpg:next"):
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        view["page"] += (-1 if data.endswith("prev") else 1)
+        await q.edit_message_text(pwpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, view["rid"]))
+
+    elif data == "pwnop":
+        pass
+
+    elif data == "pwflt_none":
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        view.update(filter=None, search="", team="", page=0)
+        await q.edit_message_text(pwpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, view["rid"]))
+
+    elif data == "pwflt_sel":
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        view.update(filter="selected", page=0)
+        await q.edit_message_text(pwpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, view["rid"]))
+
+    elif data == "pwflt_search":
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        ctx.user_data["await"] = ("pw_search", view["rid"])
+        await q.edit_message_text(
+            "🔍 <b>Поиск пары</b>\nПришли часть названия команды, например <code>вулв</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "pwflt_team":
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        await q.edit_message_text(
+            "🔤 <b>Фильтр по команде</b>\nВыбери команду:",
+            parse_mode="HTML", reply_markup=pwteams_kb(view["rid"]))
+
+    elif data.startswith("pwteam:"):
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        teams = prime_women_db.distinct_teams()
+        if not (0 <= idx < len(teams)):
+            return
+        view.update(filter="team", team=teams[idx], page=0)
+        await q.edit_message_text(pwpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, view["rid"]))
+
+    elif data in ("pwall_on", "pwall_off"):
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        pairs = _pw_filtered_pairs(view)
+        prime_women_db.set_pairs(view["rid"], pairs, enabled=(data == "pwall_on"))
+        await q.edit_message_text(pwpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, view["rid"]))
+
+    elif data in ("pwallg_on", "pwallg_off"):
+        view = ctx.user_data.get("pw_view")
+        if not view:
+            return
+        all_pairs = prime_women_db.distinct_pairs()   # ВСЕ пары, игнорируя фильтр
+        prime_women_db.set_pairs(view["rid"], all_pairs, enabled=(data == "pwallg_on"))
+        await q.edit_message_text(pwpairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=pwpairs_kb(ctx, view["rid"]))
+
+    elif data == "pwchat":
+        ctx.user_data["await"] = ("pwchat", None)
+        cid = database.get_chat_id(PW_STRAT_CODE)
+        await q.edit_message_text(
+            "⚙️ <b>Чат стратегии Prime Ж</b>\n"
+            f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
+            "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "pwstats":
+        await q.edit_message_text(pwstats_text(), parse_mode="HTML", reply_markup=pwstrat_kb())
+
+    elif data == "pwreports":
+        await q.edit_message_text(pwreports_text(), parse_mode="HTML", reply_markup=pwreports_kb())
+
+    elif data.startswith("pwrep:"):
+        period = data.split(":", 1)[1]
+        if period == "day":
+            text, title = reports.build_pw_daily_text(), "Дневной"
+        elif period == "week":
+            text, title = reports.build_pw_weekly_text(), "Недельный"
+        else:
+            text, title = reports.build_pw_monthly_text(), "Месячный"
+        ok, err = await _send_pw_report(ctx.bot, text)
+        if ok:
+            head = f"✅ {title} отчёт Prime Ж отправлен. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=pwreports_kb())
+
+    elif data == "pwexport":
+        await q.edit_message_text("⏳ Генерирую Excel Prime Ж…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"prime_women_signals_{ts}.xlsx"
+        try:
+            n = export_prime_women.build(str(path))
+            if n == 0:
+                await ctx.bot.send_message(q.message.chat_id,
+                                           "📊 Сигналов Prime Ж пока нет — нечего выгружать.")
+            else:
+                with open(path, "rb") as fp:
+                    await ctx.bot.send_document(
+                        chat_id=q.message.chat_id, document=fp, filename=path.name,
+                        caption=f"📊 Prime Ж · сигналов {n}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, pwstrat_text(),
+                                   parse_mode="HTML", reply_markup=pwstrat_kb())
+
+    elif data == "pwreset_ask":
+        await q.edit_message_text(
+            "⚠️ <b>Удалить все сигналы стратегии Prime Ж?</b>\n"
+            "Наборы и галочки пар не затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_pwreset_kb())
+
+    elif data == "pwreset_yes":
+        prime_women_db.clear_signals()
+        await q.edit_message_text("✅ Сигналы стратегии Prime Ж очищены.\n\n" + pwstrat_text(),
+                                  parse_mode="HTML", reply_markup=pwstrat_kb())
+
     # --- стратегия Четверти Pro Жен ----------------------------------------
     elif data == "pqstrat":
         ctx.user_data.pop("await", None)
@@ -4965,6 +5539,63 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(cspairs_text(ctx, rid), parse_mode="HTML",
                                         reply_markup=cspairs_kb(ctx, rid))
 
+    # --- стратегия Prime Ж ---
+    elif kind == "pwchat":
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_chat_id(PW_STRAT_CODE, cid)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Стратегия Prime Ж → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=pwstrat_kb())
+
+    elif kind == "pw_rule_new":
+        minute = parse_pw_minute(raw)
+        if minute is None:
+            await update.message.reply_text(
+                "❌ Минута — целое число ≥ 0, например <code>15</code>. Ещё раз или /start.",
+                parse_mode="HTML")
+            return
+        rid = prime_women_db.add_rule(minute)
+        ctx.user_data.pop("await", None)
+        rule = prime_women_db.get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Набор создан: <b>ТМ</b> · мин {minute}.\n"
+            "Теперь отметь пары кнопкой «☑️ Пары».",
+            parse_mode="HTML", reply_markup=pwrule_kb(rule))
+
+    elif kind == "pw_rule_edit":
+        rid = code                                   # code здесь = id набора
+        minute = parse_pw_minute(raw)
+        if minute is None:
+            await update.message.reply_text(
+                "❌ Минута — целое число ≥ 0, например <code>15</code>. Ещё раз или /start.",
+                parse_mode="HTML")
+            return
+        if not prime_women_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        prime_women_db.update_rule(rid, minute)
+        ctx.user_data.pop("await", None)
+        rule = prime_women_db.get_rule(rid)
+        await update.message.reply_text(
+            "✅ Набор изменён.\n\n" + pwrule_text(rule),
+            parse_mode="HTML", reply_markup=pwrule_kb(rule))
+
+    elif kind == "pw_search":
+        rid = code                                   # code здесь = id набора
+        if not prime_women_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        view = _pw_view(ctx, rid)
+        view.update(filter="search", search=raw, page=0)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(pwpairs_text(ctx, rid), parse_mode="HTML",
+                                        reply_markup=pwpairs_kb(ctx, rid))
+
     # --- стратегия Четверти Pro Жен ---
     elif kind == "pqchat":
         try:
@@ -5054,6 +5685,7 @@ def main():
     sh_pair_db.init_db()
     pq_db.init_db()
     cage_strat_db.init_db()
+    prime_women_db.init_db()
     # Миграция: старый единый чат Prime (prime_strat) переносим в чат ТМ, если тот
     # ещё не задан. Чтобы после раздельных чатов не потерять текущую настройку.
     _old_prime_chat = database.get_chat_id(PRIME_STRAT_CODE)
