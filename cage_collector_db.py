@@ -1,7 +1,7 @@
 """Отдельная БД сборщика рынков IPBL CAGE Division.
 
-Одна строка market_snapshots = снимок матча на конкретной 5-минутной отметке
-ИГРОВОГО времени (плюс одна строка ДО начала матча, game_minute = PREMATCH_MINUTE).
+Одна строка market_snapshots = снимок матча на конкретной ИГРОВОЙ минуте
+(плюс одна строка ДО начала матча, game_minute = PREMATCH_MINUTE).
 
 Рынки с ОДНОЙ линией (1X2, двойные шансы, основная фора, обе забьют) лежат прямо
 в market_snapshots. Тоталы и индивидуальные тоталы имеют по НЕСКОЛЬКО линий
@@ -41,7 +41,7 @@ def init_db():
             team2       TEXT NOT NULL,
             snap_dt_msk TEXT NOT NULL,        -- дата-время МСК снимка
             is_prematch INTEGER NOT NULL DEFAULT 0,  -- 1 = строка до начала матча
-            game_minute INTEGER NOT NULL,     -- 5-мин отметка игрового времени; prematch = -1
+            game_minute INTEGER NOT NULL,     -- игровая минута снимка; prematch = -1
             ts          INTEGER,              -- реальный timerSeconds на момент снимка
             quarter       INTEGER,            -- четверть (1..4), None до начала
             quarter_score TEXT,               -- счёт ТЕКУЩЕЙ четверти, напр. "8-6"

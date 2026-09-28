@@ -4,7 +4,7 @@
   1) /events/listBase — находит live root-матчи лиги CAGE (sportId 146499)
   2) /events/event (параллельно) — рынки матча каждого события
   3) пишет одну строку ДО начала матча ("Не начался") и далее по строке на
-     каждой 5-й ИГРОВОЙ минуте (5, 10, ..., 40) в отдельную БД cage_markets.db
+     КАЖДОЙ ИГРОВОЙ минуте (0, 1, 2, ..., 40) в отдельную БД cage_markets.db
   4) на финале матча — дорасчёт результата каждого исхода по итоговому счёту
 
 Отличия от киберспортивных сборщиков (FC 26 / NHL 26): это ЖИВОЙ баскетбол —
@@ -27,7 +27,7 @@ import requests
 import cage_collector_db as db
 from config import LINE_SERVERS, HEADERS, SCOPE_MARKET, MAX_WORKERS
 from cage_config import (SPORT_ID, LEAGUE_NAME, CAGE_POLL_INTERVAL,
-                         QUARTER_TS, FULLTIME_TS, STEP_MINUTES,
+                         QUARTER_TS,
                          PREMATCH_MINUTE, PREMATCH_COMMENTS,
                          WIN1_FID, DRAW_FID, WIN2_FID, DC_1X_FID, DC_12_FID, DC_X2_FID,
                          FORA1_FIDS, FORA2_FIDS, TOTAL_B_FIDS, TOTAL_M_FIDS,
@@ -48,7 +48,7 @@ _known: dict[int, dict] = {}          # event_id -> {sport_id, league, team1, te
 _last_score: dict[int, tuple] = {}
 _last_comment: dict[int, str] = {}
 _miss: dict[int, int] = {}            # циклов отсутствия
-_last_mark: dict[int, int] = {}       # дедуп 5-мин отметки
+_last_mark: dict[int, int] = {}       # дедуп игровой минуты
 _prematch_done: set[int] = set()      # для каких событий предматч уже записан
 
 
@@ -255,7 +255,7 @@ def _write_snapshot(state: dict, markets: dict, totals: list[dict], *, prematch:
 
 
 def process(state: dict, api_data):
-    """Пишет предматчевую строку (один раз) и далее ≤1 строку на 5-мин отметку."""
+    """Пишет предматчевую строку (один раз) и далее ≤1 строку на игровую минуту."""
     eid = state["event_id"]
     factors = _root_factors(api_data, eid)
     if not factors:
@@ -377,11 +377,9 @@ def _finalize(eid: int):
 
 
 def _mark_for(ts: int) -> Optional[int]:
-    """5-мин отметка игрового времени: 5,10,...,40. None если ещё до 5-й минуты."""
-    bucket = ts // (STEP_MINUTES * 60)
-    if bucket < 1:
-        return None
-    return bucket * STEP_MINUTES
+    """Игровая минута снимка: 0,1,2,...,40 (ts // 60). Раньше собирали по 5-мин
+    отметкам — теперь строка на каждой игровой минуте (как collector.py)."""
+    return ts // 60
 
 
 def run_cycle() -> list[dict]:
