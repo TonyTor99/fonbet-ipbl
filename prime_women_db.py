@@ -367,11 +367,72 @@ def pair_stats_from_collector(team1: str, team2: str, minute: int) -> dict:
     return {"count": count, "wins": wins, "profit": profit, "roi": roi}
 
 
+def rule_stats_from_collector(rule: dict) -> dict:
+    """Гипотетическая статистика набора по СБОРЩИКУ (prime_women_markets.db).
+
+    По ВСЕМ матчам отмеченных пар на игровой минуте набора берём последний снимок
+    минуты (MAX(id)) с рассчитанным исходом ТМ и считаем флэт STAKE по кф снимка:
+    Выигрыш -> +STAKE*(кф-1), Проигрыш -> -STAKE, Возврат/нерасчёт — не в прибыль.
+    В отличие от rule_stats() (реально отправленные сигналы), даёт бэктест набора."""
+    empty = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+             "winrate": 0.0, "profit": 0.0, "staked": 0.0, "roi": 0.0}
+    line_f, odds_f, res_f = _COLLECTOR_FIELDS
+    sel = get_rule_pairs(rule["id"])
+    try:
+        conn = _source_conn()
+        rows = conn.execute(
+            f"SELECT team1, team2, {odds_f} AS odds, {res_f} AS res, MAX(id) "
+            "FROM market_snapshots "
+            "WHERE game_minute=? GROUP BY event_id", (rule["minute"],)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return empty
+    wins = losses = pushes = no_result = 0
+    profit = 0.0
+    for r in rows:
+        if norm_pair(r["team1"], r["team2"]) not in sel:
+            continue
+        if r["odds"] is None:
+            continue                       # ТМ не котировался на минуте — не учитываем
+        res = r["res"]
+        if res == "Выигрыш":
+            wins += 1
+            profit += STAKE * (float(r["odds"]) - 1.0)
+        elif res == "Проигрыш":
+            losses += 1
+            profit += -STAKE
+        elif res == "Возврат":
+            pushes += 1
+        else:
+            no_result += 1
+    settled = wins + losses
+    staked = settled * STAKE
+    return {"signals": wins + losses + pushes + no_result,
+            "wins": wins, "losses": losses, "pushes": pushes, "no_result": no_result,
+            "winrate": (wins / settled * 100) if settled else 0.0,
+            "profit": profit, "staked": staked,
+            "roi": (profit / staked * 100) if staked else 0.0}
+
+
 def overall_stats() -> dict:
     tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
            "profit": 0.0, "staked": 0.0}
     for r in get_rules():
         st = rule_stats(r["id"])
+        for k in ("signals", "wins", "losses", "pushes", "no_result", "profit", "staked"):
+            tot[k] += st[k]
+    settled = tot["wins"] + tot["losses"]
+    tot["winrate"] = (tot["wins"] / settled * 100) if settled else 0.0
+    tot["roi"] = (tot["profit"] / tot["staked"] * 100) if tot["staked"] else 0.0
+    tot["balance"] = BANKROLL_START + tot["profit"]
+    return tot
+
+
+def overall_stats_from_collector() -> dict:
+    tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+           "profit": 0.0, "staked": 0.0}
+    for r in get_rules():
+        st = rule_stats_from_collector(r)
         for k in ("signals", "wins", "losses", "pushes", "no_result", "profit", "staked"):
             tot[k] += st[k]
     settled = tot["wins"] + tot["losses"]

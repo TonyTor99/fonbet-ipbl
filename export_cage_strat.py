@@ -12,7 +12,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 import cage_strat_db
-from config import CAGE_STRAT_PREMATCH
+from config import CAGE_STRAT_PREMATCH, CAGE_STRAT_MARKETS
 
 # (Заголовок, ключ строки БД). None-ключ -> спец-обработка в _value.
 COLUMNS = [
@@ -21,8 +21,9 @@ COLUMNS = [
     ("Лига", "league"),
     ("Команда 1", "team1"),
     ("Команда 2", "team2"),
+    ("Рынок", "__market"),
     ("Момент", "__when"),
-    ("Линия ТМ", "line"),
+    ("Линия", "line"),
     ("Кф", "odds"),
     ("Счёт (сигнал)", "__score"),
     ("Итог счёт", "final_score"),
@@ -41,6 +42,8 @@ BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 
 def _value(row: dict, key: str):
+    if key == "__market":
+        return CAGE_STRAT_MARKETS.get(row.get("market", "tm"), row.get("market", "tm"))
     if key == "__when":
         return "Прематч" if row.get("minute") == CAGE_STRAT_PREMATCH else f"мин {row.get('minute')}"
     if key == "__score":
@@ -53,9 +56,9 @@ def _value(row: dict, key: str):
     return row.get(key)
 
 
-def build(path: str, title: str = "Сигналы CAGE") -> int:
-    """Выгружает сигналы стратегии в Excel. Возвращает число строк."""
-    rows = cage_strat_db.signals_for_export()
+def build(path: str, market: str | None = None, title: str = "Сигналы CAGE") -> int:
+    """Выгружает сигналы стратегии в Excel. market — фильтр по рынку. Возвращает число строк."""
+    rows = cage_strat_db.signals_for_export(market)
     wb = Workbook()
     ws = wb.active
     ws.title = title[:31]

@@ -5,10 +5,10 @@
 БД сигналов (ipbl.db).
 
 Таблицы:
-  cage_rules       — набор: момент входа (минута; -1 = прематч) + флаг «все пары»
-                     + вкл/выкл. Рынок фиксирован (ТМ), поэтому в БД не хранится.
+  cage_rules       — набор: рынок (tm|it1|it2) + момент входа (минута; -1 = прематч)
+                     + флаг «все пары» + вкл/выкл.
   cage_rule_pairs  — галочки пар набора (нормализованная пара команд).
-  cage_signals     — отправленные сигналы ТМ + дорасчёт (result + won + profit).
+  cage_signals     — отправленные сигналы + дорасчёт (result + won + profit).
 
 Список пар/команд для галочек берётся из СБОРЩИКА (config.CAGE_STRAT_SOURCE_DB),
 а не отсюда — см. distinct_pairs()/distinct_teams().
@@ -17,7 +17,8 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from config import (CAGE_STRAT_DB, CAGE_STRAT_SOURCE_DB, BANKROLL_START, STAKE)
+from config import (CAGE_STRAT_DB, CAGE_STRAT_SOURCE_DB, BANKROLL_START, STAKE,
+                    CAGE_STRAT_KF_MIN, CAGE_STRAT_KF_MAX)
 
 DIR = Path(__file__).parent
 
@@ -55,6 +56,7 @@ def init_db():
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS cage_rules (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            market     TEXT NOT NULL DEFAULT 'tm',   -- 'tm' | 'it1' | 'it2'
             minute     INTEGER NOT NULL,            -- игровая минута сигнала; -1 = прематч
             all_pairs  INTEGER NOT NULL DEFAULT 0,  -- 1 = ловить ЛЮБУЮ пару (игнор галочек)
             enabled    INTEGER NOT NULL DEFAULT 1,
@@ -75,6 +77,7 @@ def init_db():
             rule_id     INTEGER NOT NULL,
             event_id    INTEGER NOT NULL,
             league      TEXT NOT NULL,
+            market      TEXT NOT NULL DEFAULT 'tm',  -- 'tm' | 'it1' | 'it2' (копия на момент сигнала)
             minute      INTEGER NOT NULL,            -- минута правила (-1 = прематч)
             fired_minute INTEGER,                    -- фактическая игровая минута отправки (прематч = -1)
             team1       TEXT NOT NULL,               -- команды как в матче (исходный порядок)
@@ -97,13 +100,22 @@ def init_db():
             ON cage_signals(rule_id, event_id);
         CREATE INDEX IF NOT EXISTS idx_cage_sig_event ON cage_signals(event_id);
     """)
+    # Миграция старых БД (созданных до добавления рынка): дозаливаем колонку market.
+    for table in ("cage_rules", "cage_signals"):
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if "market" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN market TEXT NOT NULL DEFAULT 'tm'")
     conn.commit()
     conn.close()
 
 
-def clear_signals():
+def clear_signals(market: str | None = None):
+    """Удаляет отправленные сигналы. market=None — все; иначе только этого рынка."""
     conn = _conn()
-    conn.execute("DELETE FROM cage_signals")
+    if market is None:
+        conn.execute("DELETE FROM cage_signals")
+    else:
+        conn.execute("DELETE FROM cage_signals WHERE market=?", (market,))
     conn.commit()
     conn.close()
 
@@ -159,9 +171,13 @@ def distinct_teams() -> list[str]:
 
 # --- наборы (правила) ------------------------------------------------------
 
-def get_rules() -> list[dict]:
+def get_rules(market: str | None = None) -> list[dict]:
     conn = _conn()
-    rows = conn.execute("SELECT * FROM cage_rules ORDER BY id").fetchall()
+    if market is None:
+        rows = conn.execute("SELECT * FROM cage_rules ORDER BY id").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM cage_rules WHERE market=? ORDER BY id", (market,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -173,20 +189,22 @@ def get_rule(rule_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def add_rule(minute: int) -> int:
+def add_rule(market: str, minute: int) -> int:
     conn = _conn()
     cur = conn.execute(
-        "INSERT INTO cage_rules (minute, all_pairs, enabled, created_at) VALUES (?, 0, 1, ?)",
-        (int(minute), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        "INSERT INTO cage_rules (market, minute, all_pairs, enabled, created_at) "
+        "VALUES (?, ?, 0, 1, ?)",
+        (market, int(minute), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     rid = cur.lastrowid
     conn.close()
     return rid
 
 
-def update_rule(rule_id: int, minute: int):
+def update_rule(rule_id: int, market: str, minute: int):
     conn = _conn()
-    conn.execute("UPDATE cage_rules SET minute=? WHERE id=?", (int(minute), rule_id))
+    conn.execute("UPDATE cage_rules SET market=?, minute=? WHERE id=?",
+                 (market, int(minute), rule_id))
     conn.commit()
     conn.close()
 
@@ -294,11 +312,11 @@ def insert_signal(sig: dict) -> int | None:
     try:
         cur = conn.execute("""
             INSERT INTO cage_signals
-                (rule_id, event_id, league, minute, fired_minute, team1, team2,
+                (rule_id, event_id, league, market, minute, fired_minute, team1, team2,
                  line, odds, score1, score2, chat_id, message_id, status,
                  result, won, final_score, final_total, profit, created_at)
             VALUES
-                (:rule_id, :event_id, :league, :minute, :fired_minute, :team1, :team2,
+                (:rule_id, :event_id, :league, :market, :minute, :fired_minute, :team1, :team2,
                  :line, :odds, :score1, :score2, :chat_id, :message_id, :status,
                  :result, :won, :final_score, :final_total, :profit, :created_at)
         """, sig)
@@ -379,11 +397,107 @@ def pair_stats(team1: str, team2: str) -> dict:
     return {"count": count, "wins": wins, "profit": profit, "roi": roi}
 
 
-def overall_stats() -> dict:
+def overall_stats(market: str | None = None) -> dict:
     tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
            "profit": 0.0, "staked": 0.0}
-    for r in get_rules():
+    for r in get_rules(market):
         st = rule_stats(r["id"])
+        for k in ("signals", "wins", "losses", "pushes", "no_result", "profit", "staked"):
+            tot[k] += st[k]
+    settled = tot["wins"] + tot["losses"]
+    tot["winrate"] = (tot["wins"] / settled * 100) if settled else 0.0
+    tot["roi"] = (tot["profit"] / tot["staked"] * 100) if tot["staked"] else 0.0
+    tot["balance"] = BANKROLL_START + tot["profit"]
+    return tot
+
+
+# --- статистика ПО СБОРЩИКУ (гипотетический бэктест по настройкам набора) ----
+# Экран статистики набора показывает не только реально отправленные сигналы, а
+# гипотетический результат по ВСЕМ матчам сборщика, подходящим под набор (та же
+# игровая минута + пары/все пары + рынок), по «ровной» линии (кф ≈ 2.0), как при
+# отправке сигнала. Прибыль флэт STAKE по кф снимка. По аналогии с prime.
+
+_KIND_BY_MARKET = {"tm": "total", "it1": "it1", "it2": "it2"}
+
+
+def _pick_even_line(lines: list) -> dict | None:
+    """«Ровная» линия из total_lines одного снимка одного вида: наибольший кф
+    «меньше» в окне CAGE_STRAT_KF_MIN..MAX, иначе наибольший доступный."""
+    items = [ln for ln in lines if ln["m_odds"] is not None]
+    if not items:
+        return None
+    in_range = [ln for ln in items
+                if CAGE_STRAT_KF_MIN <= ln["m_odds"] <= CAGE_STRAT_KF_MAX]
+    pool = in_range or items
+    return max(pool, key=lambda ln: ln["m_odds"])
+
+
+def rule_stats_from_collector(rule: dict) -> dict:
+    """Гипотетическая статистика набора по СБОРЩИКУ (cage_markets.db).
+
+    По каждому матчу берём последний снимок его игровой минуты (== rule['minute'];
+    -1 = прематч), «ровную» линию нужного вида (total/it1/it2) и её результат «меньше».
+    Флэт STAKE по кф снимка: Выигрыш -> +STAKE*(кф-1), Проигрыш -> -STAKE, Возврат/
+    нерасчёт (r_m NULL) — не в прибыль. Пары фильтруем по набору (или «все пары»).
+    """
+    empty = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+             "winrate": 0.0, "profit": 0.0, "staked": 0.0, "roi": 0.0}
+    kind = _KIND_BY_MARKET.get(rule.get("market", "tm"))
+    if kind is None:
+        return empty
+    sel = None if rule.get("all_pairs") else get_rule_pairs(rule["id"])
+    try:
+        conn = _source_conn()
+        rows = conn.execute(
+            """SELECT ms.event_id AS event_id, ms.team1 AS team1, ms.team2 AS team2,
+                      tl.line AS line, tl.m_odds AS m_odds, tl.r_m AS r_m
+               FROM market_snapshots ms
+               JOIN (SELECT event_id, MAX(id) AS mid FROM market_snapshots
+                     WHERE game_minute=? GROUP BY event_id) last ON ms.id = last.mid
+               JOIN total_lines tl ON tl.snapshot_id = ms.id AND tl.kind = ?""",
+            (rule["minute"], kind)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return empty
+    by_event: dict[int, dict] = {}
+    for r in rows:
+        e = by_event.setdefault(r["event_id"],
+                                {"team1": r["team1"], "team2": r["team2"], "lines": []})
+        e["lines"].append(r)
+    wins = losses = pushes = no_result = 0
+    profit = 0.0
+    for ev in by_event.values():
+        if sel is not None and norm_pair(ev["team1"], ev["team2"]) not in sel:
+            continue
+        ln = _pick_even_line(ev["lines"])
+        if ln is None:
+            continue                       # рынок этого вида не котировался — не учитываем
+        res = ln["r_m"]
+        if res == "Выигрыш":
+            wins += 1
+            if ln["m_odds"] is not None:
+                profit += STAKE * (float(ln["m_odds"]) - 1.0)
+        elif res == "Проигрыш":
+            losses += 1
+            profit += -STAKE
+        elif res == "Возврат":
+            pushes += 1
+        else:
+            no_result += 1
+    settled = wins + losses
+    staked = settled * STAKE
+    return {"signals": wins + losses + pushes + no_result,
+            "wins": wins, "losses": losses, "pushes": pushes, "no_result": no_result,
+            "winrate": (wins / settled * 100) if settled else 0.0,
+            "profit": profit, "staked": staked,
+            "roi": (profit / staked * 100) if staked else 0.0}
+
+
+def overall_stats_from_collector(market: str | None = None) -> dict:
+    tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+           "profit": 0.0, "staked": 0.0}
+    for r in get_rules(market):
+        st = rule_stats_from_collector(r)
         for k in ("signals", "wins", "losses", "pushes", "no_result", "profit", "staked"):
             tot[k] += st[k]
     settled = tot["wins"] + tot["losses"]
@@ -395,30 +509,43 @@ def overall_stats() -> dict:
 
 # --- прибыль для отчётов (день/неделя/месяц) -------------------------------
 
-def profit_by_day(start: str, end: str) -> dict[str, float]:
+def profit_by_day(start: str, end: str, market: str | None = None) -> dict[str, float]:
     conn = _conn()
-    rows = conn.execute(
-        "SELECT date(created_at) AS d, COALESCE(SUM(profit), 0) AS p "
-        "FROM cage_signals WHERE status='sent' AND profit IS NOT NULL "
-        "AND date(created_at) BETWEEN ? AND ? GROUP BY d", (start, end)).fetchall()
+    q = ("SELECT date(created_at) AS d, COALESCE(SUM(profit), 0) AS p "
+         "FROM cage_signals WHERE status='sent' AND profit IS NOT NULL "
+         "AND date(created_at) BETWEEN ? AND ?")
+    args = [start, end]
+    if market is not None:
+        q += " AND market=?"
+        args.append(market)
+    q += " GROUP BY d"
+    rows = conn.execute(q, args).fetchall()
     conn.close()
     return {r["d"]: r["p"] for r in rows}
 
 
-def profit_total(start: str, end: str) -> float:
+def profit_total(start: str, end: str, market: str | None = None) -> float:
     conn = _conn()
-    v = conn.execute(
-        "SELECT COALESCE(SUM(profit), 0) FROM cage_signals "
-        "WHERE status='sent' AND profit IS NOT NULL AND date(created_at) BETWEEN ? AND ?",
-        (start, end)).fetchone()[0]
+    q = ("SELECT COALESCE(SUM(profit), 0) FROM cage_signals "
+         "WHERE status='sent' AND profit IS NOT NULL AND date(created_at) BETWEEN ? AND ?")
+    args = [start, end]
+    if market is not None:
+        q += " AND market=?"
+        args.append(market)
+    v = conn.execute(q, args).fetchone()[0]
     conn.close()
     return v
 
 
-def signals_for_export() -> list[dict]:
-    """Отправленные сигналы стратегии для Excel-выгрузки."""
+def signals_for_export(market: str | None = None) -> list[dict]:
+    """Отправленные сигналы стратегии для Excel-выгрузки. market — фильтр по рынку."""
     conn = _conn()
-    rows = conn.execute(
-        "SELECT * FROM cage_signals WHERE status='sent' ORDER BY created_at, id").fetchall()
+    q = "SELECT * FROM cage_signals WHERE status='sent'"
+    args: list = []
+    if market is not None:
+        q += " AND market=?"
+        args.append(market)
+    q += " ORDER BY created_at, id"
+    rows = conn.execute(q, args).fetchall()
     conn.close()
     return [dict(r) for r in rows]

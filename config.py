@@ -248,15 +248,30 @@ PQ_QUARTER_MIN = 10
 # сигналы (только отправленные, с результатом) пишем в ОТДЕЛЬНЫЙ файл (CAGE_STRAT_DB).
 # По аналогии с Prime/ШХ: свой чат, статистика/ROI, Excel, отчёты день/нед/мес.
 # ===========================================================================
-CAGE_STRAT_CODE = "cage_strat"                 # код в bot_config для chat_id стратегии
+CAGE_STRAT_CODE = "cage_strat"                 # СТАРЫЙ единый код чата (миграция → TM)
 CAGE_STRAT_SOURCE_DB = "cage_markets.db"       # откуда берём список пар (сборщик CAGE)
 CAGE_STRAT_DB = "cage_strategy.db"             # отдельный файл сигналов стратегии
+
+# Рынки стратегии CAGE: код -> подпись. tm = тотал матча меньше, it1 = инд. тотал
+# К1 меньше, it2 = инд. тотал К2 меньше. Линия сигнала — «ровная» (кф ≈ 2.0) своего
+# вида (total/it1/it2) из ЖИВЫХ рынков CAGE.
+CAGE_STRAT_MARKETS = {"tm": "ТМ", "it1": "ИТМ1", "it2": "ИТМ2"}
+
+# Три НЕЗАВИСИМЫХ рынка CAGE — ТМ / ИТМ1 / ИТМ2 — шлют в РАЗНЫЕ чаты (свои коды в
+# bot_config) и считаются раздельно. БД одна (CAGE_STRAT_DB), разделение по полю
+# market. Excel/статистика/отчёты — по каждому рынку отдельно. Старый единый чат
+# CAGE_STRAT_CODE мигрируется в чат ТМ (см. bot.main).
+CAGE_STRAT_CODE_TM = "cage_strat_tm"
+CAGE_STRAT_CODE_IT1 = "cage_strat_it1"
+CAGE_STRAT_CODE_IT2 = "cage_strat_it2"
+CAGE_STRAT_CHAT = {"tm": CAGE_STRAT_CODE_TM, "it1": CAGE_STRAT_CODE_IT1,
+                   "it2": CAGE_STRAT_CODE_IT2}
 
 # Метка момента «Прематч» (минута-сентинел; совпадает с PREMATCH_MINUTE сборщика).
 CAGE_STRAT_PREMATCH = -1
 
-# Окно кф «ровной» линии ТМ (как KF_MIN/KF_MAX стратегии IPBL): берём ТМ с
-# наибольшим кф в окне; если ничто не попало — наибольший доступный кф.
+# Окно кф «ровной» линии (как KF_MIN/KF_MAX стратегии IPBL): берём линию с
+# наибольшим кф «меньше» в окне; если ничто не попало — наибольший доступный кф.
 CAGE_STRAT_KF_MIN = 1.95
 CAGE_STRAT_KF_MAX = 2.10
 

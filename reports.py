@@ -252,27 +252,34 @@ def build_pq_monthly_text(now: datetime | None = None) -> str:
 # ===========================================================================
 # Отчёты стратегии CAGE (отдельный источник — cage_strat_db, отдельный чат).
 # ===========================================================================
-CAGE_STRAT_HEADER = "Стратегия CAGE · ТМ"
+# Шапка отчёта на каждый рынок CAGE (ТМ / ИТМ1 / ИТМ2 идут в свои чаты).
+CAGE_HEADERS = {"tm": "Стратегия CAGE · ТМ", "it1": "Стратегия CAGE · ИТМ1",
+                "it2": "Стратегия CAGE · ИТМ2"}
 
 
-def build_cage_strat_daily_text(now: datetime | None = None, day: date | None = None) -> str:
+def _cage_header(market: str) -> str:
+    return CAGE_HEADERS.get(market, "Стратегия CAGE")
+
+
+def build_cage_strat_daily_text(now: datetime | None = None, day: date | None = None,
+                                market: str = "tm") -> str:
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
-    total = cage_strat_db.profit_total(day.isoformat(), day.isoformat())
+    total = cage_strat_db.profit_total(day.isoformat(), day.isoformat(), market)
     return "\n".join([
-        CAGE_STRAT_HEADER,
+        _cage_header(market),
         GREETING,
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
 
-def build_cage_strat_weekly_text(now: datetime | None = None) -> str:
+def build_cage_strat_weekly_text(now: datetime | None = None, market: str = "tm") -> str:
     now = now or datetime.now(MSK)
     start, end = last_week_range(now.date())
-    by_day = cage_strat_db.profit_by_day(start.isoformat(), end.isoformat())
-    total = cage_strat_db.profit_total(start.isoformat(), end.isoformat())
+    by_day = cage_strat_db.profit_by_day(start.isoformat(), end.isoformat(), market)
+    total = cage_strat_db.profit_total(start.isoformat(), end.isoformat(), market)
     lines = [
-        CAGE_STRAT_HEADER,
+        _cage_header(market),
         GREETING,
         f"За прошедшую неделю прибыль составила {_pct(total):.2f}%",
     ]
@@ -282,12 +289,12 @@ def build_cage_strat_weekly_text(now: datetime | None = None) -> str:
     return "\n".join(lines)
 
 
-def build_cage_strat_monthly_text(now: datetime | None = None) -> str:
+def build_cage_strat_monthly_text(now: datetime | None = None, market: str = "tm") -> str:
     now = now or datetime.now(MSK)
     start, end = last_month_range(now.date())
-    total = cage_strat_db.profit_total(start.isoformat(), end.isoformat())
+    total = cage_strat_db.profit_total(start.isoformat(), end.isoformat(), market)
     return "\n".join([
-        CAGE_STRAT_HEADER,
+        _cage_header(market),
         GREETING,
         f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
     ])

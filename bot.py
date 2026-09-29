@@ -55,7 +55,8 @@ from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     PRIME_STRAT_CHAT, PRIME_MARKETS, sh_short_league,
                     SH_PAIR_STRAT_CODE, SH_PAIR_SIDES, SH_PAIR_PREMATCH,
                     PQ_STRAT_CODE, PQ_SIDES,
-                    CAGE_STRAT_CODE, CAGE_STRAT_PREMATCH, PW_STRAT_CODE)
+                    CAGE_STRAT_CODE, CAGE_STRAT_CODE_TM, CAGE_STRAT_CHAT,
+                    CAGE_STRAT_MARKETS, CAGE_STRAT_PREMATCH, PW_STRAT_CODE)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -820,11 +821,11 @@ async def _send_pq_report(bot, text: str):
         return False, str(e)
 
 
-async def _send_cage_strat_report(bot, text: str):
-    """Публикует отчёт стратегии CAGE в её чат. (ok, err_text)."""
-    cid = database.get_chat_id(CAGE_STRAT_CODE)
+async def _send_cage_strat_report(bot, text: str, market: str):
+    """Публикует отчёт рынка стратегии CAGE в чат этого рынка. (ok, err_text)."""
+    cid = database.get_chat_id(CAGE_STRAT_CHAT[market])
     if cid is None:
-        return False, "chat_id CAGE не задан (задай в «🏀 Стратегия CAGE → Чат стратегии»)."
+        return False, f"chat_id CAGE {CAGE_STRAT_MARKETS.get(market, market)} не задан."
     try:
         await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
         return True, None
@@ -968,32 +969,37 @@ async def _report_scheduler(app):
                         database.set_report_marker("pq_monthly", marker)
                         print(f"[REPORT] pq monthly sent for {marker}")
             # CAGE: дневной каждый день, недельный (Пн), месячный (1-е) — 09:00 МСК.
-            if now.hour >= 9:
-                marker = now.strftime("%Y-%m-%d")
-                if database.get_report_marker("cage_strat_daily") != marker:
-                    ok, err = await _send_cage_strat_report(
-                        app.bot, reports.build_cage_strat_daily_text(now))
-                    if ok:
-                        database.set_report_marker("cage_strat_daily", marker)
-                        print(f"[REPORT] cage daily sent for {marker}")
-                    else:
-                        print(f"[REPORT] cage daily NOT sent: {err}")
-            if now.weekday() == 0 and now.hour >= 9:
-                marker = now.strftime("%Y-%m-%d")
-                if database.get_report_marker("cage_strat_weekly") != marker:
-                    ok, err = await _send_cage_strat_report(
-                        app.bot, reports.build_cage_strat_weekly_text(now))
-                    if ok:
-                        database.set_report_marker("cage_strat_weekly", marker)
-                        print(f"[REPORT] cage weekly sent for {marker}")
-            if now.day == 1 and now.hour >= 9:
-                marker = now.strftime("%Y-%m")
-                if database.get_report_marker("cage_strat_monthly") != marker:
-                    ok, err = await _send_cage_strat_report(
-                        app.bot, reports.build_cage_strat_monthly_text(now))
-                    if ok:
-                        database.set_report_marker("cage_strat_monthly", marker)
-                        print(f"[REPORT] cage monthly sent for {marker}")
+            # Отдельно на каждый рынок (ТМ / ИТМ1 / ИТМ2) в свой чат, свои маркеры.
+            for mk in CAGE_STRAT_MARKETS:
+                if now.hour >= 9:
+                    marker = now.strftime("%Y-%m-%d")
+                    key = f"cage_strat_daily_{mk}"
+                    if database.get_report_marker(key) != marker:
+                        ok, err = await _send_cage_strat_report(
+                            app.bot, reports.build_cage_strat_daily_text(now, market=mk), mk)
+                        if ok:
+                            database.set_report_marker(key, marker)
+                            print(f"[REPORT] cage {mk} daily sent for {marker}")
+                        else:
+                            print(f"[REPORT] cage {mk} daily NOT sent: {err}")
+                if now.weekday() == 0 and now.hour >= 9:
+                    marker = now.strftime("%Y-%m-%d")
+                    key = f"cage_strat_weekly_{mk}"
+                    if database.get_report_marker(key) != marker:
+                        ok, err = await _send_cage_strat_report(
+                            app.bot, reports.build_cage_strat_weekly_text(now, market=mk), mk)
+                        if ok:
+                            database.set_report_marker(key, marker)
+                            print(f"[REPORT] cage {mk} weekly sent for {marker}")
+                if now.day == 1 and now.hour >= 9:
+                    marker = now.strftime("%Y-%m")
+                    key = f"cage_strat_monthly_{mk}"
+                    if database.get_report_marker(key) != marker:
+                        ok, err = await _send_cage_strat_report(
+                            app.bot, reports.build_cage_strat_monthly_text(now, market=mk), mk)
+                        if ok:
+                            database.set_report_marker(key, marker)
+                            print(f"[REPORT] cage {mk} monthly sent for {marker}")
             # Prime Ж: дневной каждый день, недельный (Пн), месячный (1-е) — 09:00 МСК.
             if now.hour >= 9:
                 marker = now.strftime("%Y-%m-%d")
@@ -2211,34 +2217,43 @@ def parse_cs_time(raw: str):
 
 
 def csstrat_kb() -> InlineKeyboardMarkup:
+    chat_row = [InlineKeyboardButton(f"⚙️ Чат {label}", callback_data=f"cschat:{mk}")
+                for mk, label in CAGE_STRAT_MARKETS.items()]
+    excel_row = [InlineKeyboardButton(f"📥 {label}", callback_data=f"csexport:{mk}")
+                 for mk, label in CAGE_STRAT_MARKETS.items()]
+    reset_row = [InlineKeyboardButton(f"🗑 {label}", callback_data=f"csreset_ask:{mk}")
+                 for mk, label in CAGE_STRAT_MARKETS.items()]
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Наборы (момент + пары)", callback_data="csrules")],
-        [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="cschat")],
+        [InlineKeyboardButton("📋 Наборы (рынок+момент+пары)", callback_data="csrules")],
+        chat_row,
         [InlineKeyboardButton("📊 Статистика", callback_data="csstats")],
         [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="csreports")],
-        [InlineKeyboardButton("📥 Excel", callback_data="csexport")],
-        [InlineKeyboardButton("🗑 Сброс сигналов", callback_data="csreset_ask")],
+        excel_row,
+        reset_row,
         [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
     ])
 
 
-def _cs_chat_line() -> str:
-    cid = database.get_chat_id(CAGE_STRAT_CODE)
+def _cs_chat_line(market: str) -> str:
+    label = CAGE_STRAT_MARKETS.get(market, market)
+    cid = database.get_chat_id(CAGE_STRAT_CHAT[market])
     val = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
-    return f"Чат отправки: {val}"
+    return f"Чат {label}: {val}"
 
 
 def csstrat_text() -> str:
     rules = cage_strat_db.get_rules()
     on = sum(1 for r in rules if r["enabled"])
+    chat_lines = "\n".join(_cs_chat_line(mk) for mk in CAGE_STRAT_MARKETS)
     return (
-        "🏀 <b>Стратегия CAGE (ТМ по ровной линии)</b>\n"
+        "🏀 <b>Стратегия CAGE (ТМ / ИТМ1 / ИТМ2 по ровной линии)</b>\n"
         f"Сборщик: {'🟢 работает' if cage_parser_running() else '🔴 остановлен'}\n"
-        f"{_cs_chat_line()}\n"
+        f"{chat_lines}\n"
         f"Наборов: {len(rules)} (включено {on})\n\n"
-        "Набор = момент входа (Прематч или игровая минута) + пары. На заданном "
-        "моменте матча CAGE Division по отмеченной паре (или в режиме «все пары») "
-        "шлётся сигнал ТМ по «ровной» линии тотала (кф ≈ 2,0).\n"
+        "Набор = рынок (ТМ/ИТМ1/ИТМ2) + момент входа (Прематч или игровая минута) + "
+        "пары. На заданном моменте матча CAGE Division по отмеченной паре (или в "
+        "режиме «все пары») шлётся сигнал по «ровной» линии рынка (кф ≈ 2,0) в чат "
+        "своего рынка.\n"
         "⚠️ Список пар берётся из сборщика CAGE (cage_markets.db) — он должен собирать матчи."
     )
 
@@ -2246,7 +2261,8 @@ def csstrat_text() -> str:
 def cs_rule_label(rule: dict) -> str:
     mark = "✅" if rule["enabled"] else "🚫"
     pairs = "все пары" if rule["all_pairs"] else f"пар {cage_strat_db.count_pairs(rule['id'])}"
-    return f"{mark} ТМ · {cage_strat_signals.time_label(rule['minute'])} · {pairs}"
+    return (f"{mark} {cage_strat_signals.market_label(rule['market'])} · "
+            f"{cage_strat_signals.time_label(rule['minute'])} · {pairs}")
 
 
 def csrules_kb() -> InlineKeyboardMarkup:
@@ -2267,6 +2283,13 @@ def csrules_text() -> str:
     return "\n".join(lines)
 
 
+def csadd_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(label, callback_data=f"csaddmk:{code}")]
+            for code, label in CAGE_STRAT_MARKETS.items()]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="csrules")])
+    return InlineKeyboardMarkup(rows)
+
+
 def csrule_kb(rule: dict) -> InlineKeyboardMarkup:
     rid = rule["id"]
     toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
@@ -2274,6 +2297,8 @@ def csrule_kb(rule: dict) -> InlineKeyboardMarkup:
             else "🌐 Все пары: выкл → включить")
     rows = [
         [InlineKeyboardButton(toggle, callback_data=f"cstgl:{rid}")],
+        [InlineKeyboardButton(f"🔀 Рынок: {cage_strat_signals.market_label(rule['market'])} → сменить",
+                              callback_data=f"csmk:{rid}")],
         [InlineKeyboardButton("✏️ Момент входа", callback_data=f"csedit:{rid}")],
         [InlineKeyboardButton(allp, callback_data=f"csallp:{rid}")],
     ]
@@ -2286,19 +2311,20 @@ def csrule_kb(rule: dict) -> InlineKeyboardMarkup:
 
 
 def csrule_text(rule: dict) -> str:
-    st = cage_strat_db.rule_stats(rule["id"])
+    st = cage_strat_db.rule_stats_from_collector(rule)
+    mk = cage_strat_signals.market_label(rule["market"])
     pairs = ("<b>все пары</b> (ловит любую)" if rule["all_pairs"]
              else f"отмечено <b>{cage_strat_db.count_pairs(rule['id'])}</b>")
     lines = [
-        "🏀 <b>Набор CAGE · ТМ</b>",
+        f"🏀 <b>Набор CAGE · {mk}</b>",
         f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
         "",
         f"⏱ Момент: <b>{cage_strat_signals.time_label(rule['minute'])}</b>",
-        f"🎯 Рынок: <b>ТМ (ровная линия)</b>",
+        f"🎯 Рынок: <b>{mk} (ровная линия)</b>",
         f"☑️ Пары: {pairs}",
         "",
-        "<b>Статистика</b>",
-        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        "<b>Статистика по сборщику</b> (гипотетически, по настройкам набора)",
+        f"Матчей: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
         f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
     ]
     if st["wins"] + st["losses"] > 0:
@@ -2314,23 +2340,28 @@ def confirm_csdel_kb(rule_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
-def confirm_csreset_kb() -> InlineKeyboardMarkup:
+def confirm_csreset_kb(market: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Да, удалить", callback_data="csreset_yes"),
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"csreset_yes:{market}"),
         InlineKeyboardButton("❌ Отмена", callback_data="csstrat"),
     ]])
 
 
 def csreports_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📤 День", callback_data="csrep:day"),
-         InlineKeyboardButton("неделя", callback_data="csrep:week"),
-         InlineKeyboardButton("месяц", callback_data="csrep:month")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="csstrat")],
-    ])
+    """Отчёты по каждому рынку отдельно — уходят в чат своего рынка."""
+    rows = []
+    for mk, label in CAGE_STRAT_MARKETS.items():
+        rows.append([
+            InlineKeyboardButton(f"📤 {label}: день", callback_data=f"csrep:{mk}:day"),
+            InlineKeyboardButton("неделя", callback_data=f"csrep:{mk}:week"),
+            InlineKeyboardButton("месяц", callback_data=f"csrep:{mk}:month"),
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="csstrat")])
+    return InlineKeyboardMarkup(rows)
 
 
 def csreports_text() -> str:
+    chat_lines = "\n".join(_cs_chat_line(mk) for mk in CAGE_STRAT_MARKETS)
     return (
         "📈 <b>Отчёты стратегии CAGE</b>\n\n"
         "Процент прибыли — от банка "
@@ -2338,36 +2369,50 @@ def csreports_text() -> str:
         "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
         "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
         "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
-        f"{_cs_chat_line()}\n\n"
+        "ТМ / ИТМ1 / ИТМ2 считаются и уходят раздельно, каждый в свой чат:\n"
+        f"{chat_lines}\n\n"
         "Кнопки ниже — отправить вручную сейчас."
     )
 
 
-def cage_strat_stats_section() -> str:
-    """Блок статистики стратегии CAGE (для общего экрана и экрана статистики)."""
-    cid = database.get_chat_id(CAGE_STRAT_CODE)
-    lines = ["", "", "🏀 <b>СТРАТЕГИЯ CAGE</b>  "
+def _cage_market_block(market: str) -> list[str]:
+    """Блок статистики одного рынка CAGE (гипотетически по сборщику, по наборам)."""
+    label = cage_strat_signals.market_label(market)
+    cid = database.get_chat_id(CAGE_STRAT_CHAT[market])
+    lines = ["", "", f"🏀 <b>CAGE · {label}</b>  "
              f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
-    rules = cage_strat_db.get_rules()
+    rules = cage_strat_db.get_rules(market)
     if not rules:
-        lines.append("Наборов ещё нет — добавь в «🏀 Стратегия CAGE».")
-        return "\n".join(lines)
-    tot = cage_strat_db.overall_stats()
-    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+        lines.append("Наборов нет.")
+        return lines
+    tot = cage_strat_db.overall_stats_from_collector(market)
+    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}")
     for r in rules:
-        st = cage_strat_db.rule_stats(r["id"])
-        if st["signals"] == 0:
-            continue
-        lines += ["", f"• ТМ · {cage_strat_signals.time_label(r['minute'])} · "
-                  f"{'все пары' if r['all_pairs'] else 'пар ' + str(cage_strat_db.count_pairs(r['id']))}: "
-                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        st = cage_strat_db.rule_stats_from_collector(r)
+        pairs = 'все пары' if r['all_pairs'] else 'пар ' + str(cage_strat_db.count_pairs(r['id']))
+        lines += ["", f"• {label} · {cage_strat_signals.time_label(r['minute'])} · {pairs}: "
+                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
             lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+    return lines
+
+
+def cage_strat_stats_section() -> str:
+    """Блок статистики стратегии CAGE (для общего экрана и экрана статистики).
+
+    Считается ГИПОТЕТИЧЕСКИ по сборщику (cage_markets.db) по настройкам наборов
+    (минута + пары/все пары + рынок), а не по реально отправленным сигналам."""
+    lines: list[str] = ["", "🏀 <b>СТРАТЕГИЯ CAGE</b> (гипотетически, по сборщику)"]
+    if not cage_strat_db.get_rules():
+        lines.append("Наборов ещё нет — добавь в «🏀 Стратегия CAGE».")
+        return "\n".join(lines)
+    for market in CAGE_STRAT_MARKETS:
+        lines += _cage_market_block(market)
     return "\n".join(lines)
 
 
@@ -2571,7 +2616,7 @@ def pwrule_kb(rule: dict) -> InlineKeyboardMarkup:
 
 
 def pwrule_text(rule: dict) -> str:
-    st = prime_women_db.rule_stats(rule["id"])
+    st = prime_women_db.rule_stats_from_collector(rule)
     lines = [
         "🏀 <b>Набор Prime Ж · ТМ</b>",
         f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
@@ -2580,8 +2625,8 @@ def pwrule_text(rule: dict) -> str:
         f"🎯 Рынок: <b>ТМ (крайняя линия)</b>",
         f"☑️ Отмечено пар: <b>{prime_women_db.count_pairs(rule['id'])}</b>",
         "",
-        "<b>Статистика</b>",
-        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        "<b>Статистика по сборщику</b> (гипотетически, по настройкам набора)",
+        f"Матчей: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
         f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
     ]
     if st["wins"] + st["losses"] > 0:
@@ -2627,26 +2672,27 @@ def pwreports_text() -> str:
 
 
 def prime_women_stats_section() -> str:
-    """Блок статистики стратегии Prime Ж (для общего экрана и экрана статистики)."""
+    """Блок статистики стратегии Prime Ж (для общего экрана и экрана статистики).
+
+    Считается ГИПОТЕТИЧЕСКИ по сборщику (prime_women_markets.db) по настройкам
+    наборов (минута + пары), а не по реально отправленным сигналам."""
     cid = database.get_chat_id(PW_STRAT_CODE)
-    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRIME Ж</b>  "
+    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRIME Ж</b> (гипотетически, по сборщику)  "
              f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
     rules = prime_women_db.get_rules()
     if not rules:
         lines.append("Наборов ещё нет — добавь в «🏀 Стратегия Prime Ж».")
         return "\n".join(lines)
-    tot = prime_women_db.overall_stats()
-    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+    tot = prime_women_db.overall_stats_from_collector()
+    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}")
     for r in rules:
-        st = prime_women_db.rule_stats(r["id"])
-        if st["signals"] == 0:
-            continue
+        st = prime_women_db.rule_stats_from_collector(r)
         lines += ["", f"• ТМ · мин {r['minute']} · пар {prime_women_db.count_pairs(r['id'])}: "
-                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
             lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
@@ -3122,8 +3168,12 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"{_rule_strat_status(sh_pair_db.get_rules(), SH_PAIR_STRAT_CODE, 'наборов')}",
                  f"• 🏀 Четверти Pro Ж: "
                  f"{_rule_strat_status(pq_db.get_rules(), PQ_STRAT_CODE, 'наборов')}",
-                 f"• 🏀 Стратегия CAGE: "
-                 f"{_rule_strat_status(cage_strat_db.get_rules(), CAGE_STRAT_CODE, 'наборов')}",
+                 f"• 🏀 CAGE ТМ: "
+                 f"{_rule_strat_status(cage_strat_db.get_rules('tm'), CAGE_STRAT_CHAT['tm'], 'наборов')}",
+                 f"• 🏀 CAGE ИТМ1: "
+                 f"{_rule_strat_status(cage_strat_db.get_rules('it1'), CAGE_STRAT_CHAT['it1'], 'наборов')}",
+                 f"• 🏀 CAGE ИТМ2: "
+                 f"{_rule_strat_status(cage_strat_db.get_rules('it2'), CAGE_STRAT_CHAT['it2'], 'наборов')}",
                  f"• 🏀 Стратегия Prime Ж: "
                  f"{_rule_strat_status(prime_women_db.get_rules(), PW_STRAT_CODE, 'наборов')}"]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
@@ -4429,12 +4479,36 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(csrules_text(), parse_mode="HTML", reply_markup=csrules_kb())
 
     elif data == "csadd":
-        ctx.user_data["await"] = ("cs_rule_new", None)
+        ctx.user_data.pop("await", None)
         await q.edit_message_text(
-            "➕ <b>Новый набор CAGE · ТМ</b>\n\n"
+            "➕ <b>Новый набор CAGE</b>\nВыбери рынок ставки:",
+            parse_mode="HTML", reply_markup=csadd_kb())
+
+    elif data.startswith("csaddmk:"):
+        market = data.split(":", 1)[1]
+        if market not in CAGE_STRAT_MARKETS:
+            return
+        ctx.user_data["await"] = ("cs_rule_new", market)
+        await q.edit_message_text(
+            f"🏀 <b>CAGE · {CAGE_STRAT_MARKETS[market]}</b>\n\n"
             "Пришли <b>момент входа</b> одним сообщением:\n"
             "<code>pre</code> — прематч, или игровая минута числом (например <code>15</code>).\n"
             "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("csmk:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = cage_strat_db.get_rule(rid)
+        if not rule:
+            return
+        codes = list(CAGE_STRAT_MARKETS)                 # tm -> it1 -> it2 -> tm
+        nxt = codes[(codes.index(rule["market"]) + 1) % len(codes)] \
+            if rule["market"] in codes else codes[0]
+        cage_strat_db.update_rule(rid, nxt, rule["minute"])
+        rule = cage_strat_db.get_rule(rid)
+        await q.edit_message_text(csrule_text(rule), parse_mode="HTML", reply_markup=csrule_kb(rule))
 
     elif data.startswith("csrule:"):
         try:
@@ -4610,11 +4684,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(cspairs_text(ctx, view["rid"]), parse_mode="HTML",
                                   reply_markup=cspairs_kb(ctx, view["rid"]))
 
-    elif data == "cschat":
-        ctx.user_data["await"] = ("cschat", None)
-        cid = database.get_chat_id(CAGE_STRAT_CODE)
+    elif data.startswith("cschat:"):
+        market = data.split(":", 1)[1]
+        if market not in CAGE_STRAT_MARKETS:
+            return
+        ctx.user_data["await"] = ("cschat", market)
+        cid = database.get_chat_id(CAGE_STRAT_CHAT[market])
+        label = CAGE_STRAT_MARKETS[market]
         await q.edit_message_text(
-            "⚙️ <b>Чат стратегии CAGE</b>\n"
+            f"⚙️ <b>Чат CAGE · {label}</b>\n"
             f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
             "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
             "Отмена — /start", parse_mode="HTML")
@@ -4626,34 +4704,41 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(csreports_text(), parse_mode="HTML", reply_markup=csreports_kb())
 
     elif data.startswith("csrep:"):
-        period = data.split(":", 1)[1]
+        _, market, period = data.split(":", 2)
+        if market not in CAGE_STRAT_MARKETS:
+            return
         if period == "day":
-            text, title = reports.build_cage_strat_daily_text(), "Дневной"
+            text, title = reports.build_cage_strat_daily_text(market=market), "Дневной"
         elif period == "week":
-            text, title = reports.build_cage_strat_weekly_text(), "Недельный"
+            text, title = reports.build_cage_strat_weekly_text(market=market), "Недельный"
         else:
-            text, title = reports.build_cage_strat_monthly_text(), "Месячный"
-        ok, err = await _send_cage_strat_report(ctx.bot, text)
+            text, title = reports.build_cage_strat_monthly_text(market=market), "Месячный"
+        ok, err = await _send_cage_strat_report(ctx.bot, text, market)
+        label = CAGE_STRAT_MARKETS[market]
         if ok:
-            head = f"✅ {title} отчёт CAGE отправлен. Текст:\n\n<code>{text}</code>"
+            head = f"✅ {title} отчёт CAGE {label} отправлен. Текст:\n\n<code>{text}</code>"
         else:
             head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
         await q.edit_message_text(head, parse_mode="HTML", reply_markup=csreports_kb())
 
-    elif data == "csexport":
-        await q.edit_message_text("⏳ Генерирую Excel CAGE…", parse_mode="HTML")
+    elif data.startswith("csexport:"):
+        market = data.split(":", 1)[1]
+        if market not in CAGE_STRAT_MARKETS:
+            return
+        label = CAGE_STRAT_MARKETS[market]
+        await q.edit_message_text(f"⏳ Генерирую Excel CAGE {label}…", parse_mode="HTML")
         ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
-        path = DIR / f"cage_strat_signals_{ts}.xlsx"
+        path = DIR / f"cage_strat_signals_{market}_{ts}.xlsx"
         try:
-            n = export_cage_strat.build(str(path))
+            n = export_cage_strat.build(str(path), market, f"CAGE {label}")
             if n == 0:
                 await ctx.bot.send_message(q.message.chat_id,
-                                           "📊 Сигналов CAGE пока нет — нечего выгружать.")
+                                           f"📊 Сигналов CAGE {label} пока нет — нечего выгружать.")
             else:
                 with open(path, "rb") as fp:
                     await ctx.bot.send_document(
                         chat_id=q.message.chat_id, document=fp, filename=path.name,
-                        caption=f"📊 CAGE · сигналов {n}")
+                        caption=f"📊 CAGE {label} · сигналов {n}")
         except Exception as e:
             await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
         finally:
@@ -4664,15 +4749,24 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(q.message.chat_id, csstrat_text(),
                                    parse_mode="HTML", reply_markup=csstrat_kb())
 
-    elif data == "csreset_ask":
+    elif data.startswith("csreset_ask:"):
+        market = data.split(":", 1)[1]
+        if market not in CAGE_STRAT_MARKETS:
+            return
+        label = CAGE_STRAT_MARKETS[market]
         await q.edit_message_text(
-            "⚠️ <b>Удалить все сигналы стратегии CAGE?</b>\n"
-            "Наборы и галочки пар не затрагиваются.\nОтменить нельзя.",
-            parse_mode="HTML", reply_markup=confirm_csreset_kb())
+            f"⚠️ <b>Удалить сигналы CAGE {label}?</b>\n"
+            f"Удалятся только сигналы рынка {label}. Наборы и галочки пар не "
+            "затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_csreset_kb(market))
 
-    elif data == "csreset_yes":
-        cage_strat_db.clear_signals()
-        await q.edit_message_text("✅ Сигналы стратегии CAGE очищены.\n\n" + csstrat_text(),
+    elif data.startswith("csreset_yes:"):
+        market = data.split(":", 1)[1]
+        if market not in CAGE_STRAT_MARKETS:
+            return
+        cage_strat_db.clear_signals(market)
+        label = CAGE_STRAT_MARKETS[market]
+        await q.edit_message_text(f"✅ Сигналы CAGE {label} очищены.\n\n" + csstrat_text(),
                                   parse_mode="HTML", reply_markup=csstrat_kb())
 
     # --- стратегия Prime Ж -------------------------------------------------
@@ -5489,24 +5583,27 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
             return
-        database.set_chat_id(CAGE_STRAT_CODE, cid)
+        market = code if code in CAGE_STRAT_MARKETS else "tm"
+        database.set_chat_id(CAGE_STRAT_CHAT[market], cid)
         ctx.user_data.pop("await", None)
         await update.message.reply_text(
-            f"✅ Стратегия CAGE → chat_id <code>{cid}</code>.",
+            f"✅ CAGE {CAGE_STRAT_MARKETS[market]} → chat_id <code>{cid}</code>.",
             parse_mode="HTML", reply_markup=csstrat_kb())
 
     elif kind == "cs_rule_new":
+        market = code if code in CAGE_STRAT_MARKETS else "tm"   # code здесь = рынок
         minute = parse_cs_time(raw)
         if minute is None:
             await update.message.reply_text(
                 "❌ Момент: <code>pre</code> (прематч) или игровая минута числом, "
                 "например <code>15</code>. Ещё раз или /start.", parse_mode="HTML")
             return
-        rid = cage_strat_db.add_rule(minute)
+        rid = cage_strat_db.add_rule(market, minute)
         ctx.user_data.pop("await", None)
         rule = cage_strat_db.get_rule(rid)
         await update.message.reply_text(
-            f"✅ Набор создан: <b>ТМ</b> · {cage_strat_signals.time_label(minute)}.\n"
+            f"✅ Набор создан: <b>{cage_strat_signals.market_label(market)}</b> · "
+            f"{cage_strat_signals.time_label(minute)}.\n"
             "Теперь отметь пары кнопкой «☑️ Пары» или включи «🌐 Все пары».",
             parse_mode="HTML", reply_markup=csrule_kb(rule))
 
@@ -5518,10 +5615,11 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 "❌ Момент: <code>pre</code> (прематч) или игровая минута числом, "
                 "например <code>15</code>. Ещё раз или /start.", parse_mode="HTML")
             return
-        if not cage_strat_db.get_rule(rid):
+        rule = cage_strat_db.get_rule(rid)
+        if not rule:
             ctx.user_data.pop("await", None)
             return
-        cage_strat_db.update_rule(rid, minute)
+        cage_strat_db.update_rule(rid, rule["market"], minute)
         ctx.user_data.pop("await", None)
         rule = cage_strat_db.get_rule(rid)
         await update.message.reply_text(
@@ -5692,6 +5790,11 @@ def main():
     if _old_prime_chat is not None and database.get_chat_id(PRIME_STRAT_CODE_TM) is None:
         database.set_chat_id(PRIME_STRAT_CODE_TM, _old_prime_chat)
         print(f"[MIGRATE] prime_strat chat {_old_prime_chat} -> prime_strat_tm")
+    # Миграция: старый единый чат CAGE (cage_strat) переносим в чат ТМ, если не задан.
+    _old_cage_chat = database.get_chat_id(CAGE_STRAT_CODE)
+    if _old_cage_chat is not None and database.get_chat_id(CAGE_STRAT_CODE_TM) is None:
+        database.set_chat_id(CAGE_STRAT_CODE_TM, _old_cage_chat)
+        print(f"[MIGRATE] cage_strat chat {_old_cage_chat} -> cage_strat_tm")
     for _name, _db in COLLECTOR_LEAGUES.values():
         collector_db.init_db(_db)
     for _name, _db in PERIOD_COLLECTOR_LEAGUES.values():

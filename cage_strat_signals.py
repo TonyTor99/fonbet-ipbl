@@ -1,17 +1,19 @@
-"""Движок стратегии CAGE (сигнал ТМ по «ровной» линии).
+"""Движок стратегии CAGE (сигнал ТМ / ИТМ1 / ИТМ2 по «ровной» линии).
 
-Наборы задаются кнопками бота (cage_strat_db): момент входа (Прематч ИЛИ строго
-заданная игровая минута) + флаг «все пары» + галочки пар. Рынок фиксирован — ТМ
-(тотал матча меньше).
+Наборы задаются кнопками бота (cage_strat_db): рынок (ТМ|ИТМ1|ИТМ2) + момент входа
+(Прематч ИЛИ строго заданная игровая минута) + флаг «все пары» + галочки пар.
 
 Срабатывание: матч лиги CAGE Division, в нужный момент (прематч ИЛИ заданная
 минута), пара матча отмечена в наборе (или включён режим «все пары»), а среди
-живых линий тотала есть ТМ — берём «ровную» линию ТМ (кф ≈ 2.0, окно
-CAGE_STRAT_KF_MIN..KF_MAX, как pick_tm_line в стратегии IPBL) и шлём один сигнал
-на матч на набор (дедуп через БД) в чат стратегии (config.CAGE_STRAT_CODE).
+живых линий нужного вида (тотал/инд.тотал К1/инд.тотал К2) есть «меньше» — берём
+«ровную» линию (кф ≈ 2.0, окно CAGE_STRAT_KF_MIN..KF_MAX, как pick_tm_line в
+стратегии IPBL) и шлём один сигнал на матч на набор (дедуп через БД) в чат СВОЕГО
+рынка (config.CAGE_STRAT_CHAT).
 
-На финале — дорасчёт по ИТОГОВОМУ тоталу основного времени:
-  ТМ: зашло, если (s1 + s2) < линия; пуш (Возврат) на целой линии.
+На финале — дорасчёт по ИТОГОВОМУ счёту основного времени:
+  ТМ:   зашло, если (s1 + s2) < линия;
+  ИТМ1: зашло, если s1 < линия;
+  ИТМ2: зашло, если s2 < линия. Пуш (Возврат) на целой линии.
 
 Подцеплен к cage_parser.py: process_match() каждый цикл, resolve() на финале.
 Извлечение факторов — локальное (без импорта cage_parser), чтобы не было цикла.
@@ -23,12 +25,19 @@ from datetime import datetime, timezone, timedelta
 import cage_strat_db
 import database
 import tg_notify
-from cage_config import TOTAL_M_FIDS
-from config import (CAGE_STRAT_CODE, CAGE_STRAT_PREMATCH,
-                    CAGE_STRAT_KF_MIN, CAGE_STRAT_KF_MAX, STAKE)
+from cage_config import TOTAL_M_FIDS, IT1_M_FIDS, IT2_M_FIDS
+from config import (CAGE_STRAT_CODE_TM, CAGE_STRAT_CHAT, CAGE_STRAT_MARKETS,
+                    CAGE_STRAT_PREMATCH, CAGE_STRAT_KF_MIN, CAGE_STRAT_KF_MAX, STAKE)
 
 log = logging.getLogger("cage_strat_signals")
 MSK = timezone(timedelta(hours=3))
+
+# Рынок -> набор factorId «меньше» соответствующего вида в root customFactors.
+MARKET_FIDS = {"tm": TOTAL_M_FIDS, "it1": IT1_M_FIDS, "it2": IT2_M_FIDS}
+
+
+def market_label(code: str) -> str:
+    return CAGE_STRAT_MARKETS.get(code, code)
 
 
 # --- извлечение живой линии ТМ из факторов матча ----------------------------
@@ -42,20 +51,20 @@ def _root_factors(api_data, event_id) -> list[dict]:
     return []
 
 
-def _tm_lines(factors: list[dict]) -> dict[float, float]:
-    """{линия: кф ТМ} по всем факторам семейства «тотал меньше» (p/100 — линия)."""
+def _market_lines(factors: list[dict], fids: set) -> dict[float, float]:
+    """{линия: кф «меньше»} по всем факторам вида рынка (p/100 — линия)."""
     out = {}
     for f in factors:
-        if f.get("f") in TOTAL_M_FIDS and f.get("p") is not None and f.get("v") is not None:
+        if f.get("f") in fids and f.get("p") is not None and f.get("v") is not None:
             out[round(f["p"] / 100.0, 1)] = f["v"]
     return out
 
 
 def pick_even_tm(tm_lines: dict[float, float]):
-    """«Ровная» линия ТМ: кф ≈ 2.0 (наибольший кф в окне, иначе наибольший доступный).
+    """«Ровная» линия рынка: кф ≈ 2.0 (наибольший кф в окне, иначе наибольший доступный).
 
     То же правило, что pick_tm_line в стратегии IPBL. Возвращает (линия, кф) или
-    (None, None), если ТМ ещё не котируется."""
+    (None, None), если рынок ещё не котируется."""
     items = [(ln, od) for ln, od in tm_lines.items() if od is not None]
     if not items:
         return None, None
@@ -92,11 +101,13 @@ def _now() -> str:
 
 # --- результат -------------------------------------------------------------
 
-def _result(total: int, line: float) -> tuple[str, int | None, float | None]:
-    """(текст, won 1/0/None, profit ₽) для ТМ. Пуш на целой линии = Возврат."""
-    if total == line:
+def _result(market: str, s1: int, s2: int, line: float) -> tuple[str, int | None, float | None]:
+    """(текст, won 1/0/None, profit ₽). ТМ по сумме, ИТМ1 по К1, ИТМ2 по К2.
+    Пуш на целой линии = Возврат."""
+    value = s1 if market == "it1" else s2 if market == "it2" else (s1 + s2)
+    if value == line:
         return "Возврат", None, 0.0
-    won = total < line
+    won = value < line
     if won:
         return "Выигрыш", 1, None            # profit проставим по кф в вызывающем коде
     return "Проигрыш", 0, float(-STAKE)
@@ -106,15 +117,16 @@ def _result(total: int, line: float) -> tuple[str, int | None, float | None]:
 
 def render_signal(sig: dict) -> str:
     st = cage_strat_db.pair_stats(sig["team1"], sig["team2"])
+    mk = market_label(sig.get("market", "tm"))
     lines = [
-        "🏀 <b>CAGE · СИГНАЛ ТМ</b>",
+        f"🏀 <b>CAGE · СИГНАЛ {mk}</b>",
         fmt_teams(sig["team1"], sig["team2"]),
         fmt_stats(st),
         "",
         f"⏱ <b>{time_label(sig['minute'])}</b>",
         f"📊 <b>Счёт {sig['score1']}:{sig['score2']}</b>",
         "",
-        f"🎯 <b>Ставка ТМ {fmt_num(sig['line'])} @{fmt_num(sig['odds'])}</b>",
+        f"🎯 <b>Ставка {mk} {fmt_num(sig['line'])} @{fmt_num(sig['odds'])}</b>",
     ]
     if sig.get("final_score"):
         lines.append(f"🏁 <b>Итог: {html.escape(str(sig['final_score']))}</b> "
@@ -142,8 +154,6 @@ def process_match(state: dict, api_data):
         return
 
     factors = _root_factors(api_data, eid)
-    line, odds = pick_even_tm(_tm_lines(factors)) if factors else (None, None)
-
     pair = cage_strat_db.norm_pair(state.get("team1") or "?", state.get("team2") or "?")
 
     for rule in rules:
@@ -151,8 +161,10 @@ def process_match(state: dict, api_data):
             continue
         if cage_strat_db.signal_exists(rule["id"], eid):
             continue
+        fids = MARKET_FIDS.get(rule["market"], TOTAL_M_FIDS)
+        line, odds = pick_even_tm(_market_lines(factors, fids)) if factors else (None, None)
         if line is None or odds is None:
-            continue  # ТМ ещё не котируется в этом цикле — попробуем на след., момент тот же
+            continue  # рынок ещё не котируется в этом цикле — попробуем на след., момент тот же
         try:
             _fire(rule, state, line, odds)
         except Exception as e:
@@ -160,12 +172,13 @@ def process_match(state: dict, api_data):
 
 
 def _fire(rule: dict, state: dict, line: float, odds: float):
-    chat_id = database.get_chat_id(CAGE_STRAT_CODE)
+    chat_id = database.get_chat_id(CAGE_STRAT_CHAT.get(rule["market"], CAGE_STRAT_CODE_TM))
     fired_minute = CAGE_STRAT_PREMATCH if state.get("prematch") else (state.get("mark") or 0)
     sig = {
         "rule_id": rule["id"],
         "event_id": state["event_id"],
         "league": state["league"],
+        "market": rule["market"],
         "minute": rule["minute"],
         "fired_minute": fired_minute,
         "team1": state.get("team1") or "?",
@@ -191,8 +204,8 @@ def _fire(rule: dict, state: dict, line: float, odds: float):
     if sid is None:
         log.info("dup skipped rule=%s ev=%s", rule["id"], state["event_id"])
     else:
-        log.info("CAGE-STRAT rule=%s ev=%s ТМ line=%s min=%s odds=%s score=%s:%s chat=%s",
-                 rule["id"], state["event_id"], line, rule["minute"], odds,
+        log.info("CAGE-STRAT rule=%s ev=%s %s line=%s min=%s odds=%s score=%s:%s chat=%s",
+                 rule["id"], state["event_id"], rule["market"], line, rule["minute"], odds,
                  state["score1"], state["score2"], chat_id)
 
 
@@ -204,7 +217,7 @@ def resolve(event_id: int, s1: int, s2: int):
         for sig in cage_strat_db.get_signals_for_event(event_id):
             if sig["result"] is not None or sig["line"] is None:
                 continue
-            result, won, profit = _result(final_total, sig["line"])
+            result, won, profit = _result(sig.get("market", "tm"), s1, s2, sig["line"])
             if won == 1 and sig["odds"] is not None:
                 profit = STAKE * (float(sig["odds"]) - 1.0)
             cage_strat_db.update_signal_result(sig["id"], result, won, final_score,
