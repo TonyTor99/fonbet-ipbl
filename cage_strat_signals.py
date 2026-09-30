@@ -116,7 +116,8 @@ def _result(market: str, s1: int, s2: int, line: float) -> tuple[str, int | None
 # --- рендер ----------------------------------------------------------------
 
 def render_signal(sig: dict) -> str:
-    st = cage_strat_db.pair_stats(sig["team1"], sig["team2"])
+    st = cage_strat_db.pair_stats_from_collector(
+        sig["team1"], sig["team2"], sig.get("market", "tm"), sig["minute"])
     mk = market_label(sig.get("market", "tm"))
     lines = [
         f"🏀 <b>CAGE · СИГНАЛ {mk}</b>",

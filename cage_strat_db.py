@@ -493,6 +493,62 @@ def rule_stats_from_collector(rule: dict) -> dict:
             "roi": (profit / staked * 100) if staked else 0.0}
 
 
+def pair_stats_from_collector(team1: str, team2: str, market: str, minute: int) -> dict:
+    """Статистика встреч пары по СБОРЩИКУ (cage_markets.db) — для строки в тексте
+    сигнала (аналог prime_women_db.pair_stats_from_collector, но с учётом рынка).
+
+    По ВСЕМ матчам пары на той же игровой минуте (== minute; -1 = прематч) и в том же
+    рынке (tm/it1/it2): берём последний снимок минуты (MAX(id)), «ровную» линию нужного
+    вида (кф ≈ 2.0) и её результат «меньше», считаем гипотетическую флэт-ставку STAKE по
+    кф снимка. Возврат/нерасчёт не в счёт. Порядок команд не важен (norm_pair).
+    Возвращает count/wins/profit/roi. Даёт более полную выборку, чем pair_stats()
+    (реально отправленные сигналы), — по всем встречам пары из сборщика."""
+    empty = {"count": 0, "wins": 0, "profit": 0.0, "roi": 0.0}
+    kind = _KIND_BY_MARKET.get(market or "tm")
+    if kind is None:
+        return empty
+    target = norm_pair(team1, team2)
+    try:
+        conn = _source_conn()
+        rows = conn.execute(
+            """SELECT ms.event_id AS event_id, ms.team1 AS team1, ms.team2 AS team2,
+                      tl.line AS line, tl.m_odds AS m_odds, tl.r_m AS r_m
+               FROM market_snapshots ms
+               JOIN (SELECT event_id, MAX(id) AS mid FROM market_snapshots
+                     WHERE game_minute=? GROUP BY event_id) last ON ms.id = last.mid
+               JOIN total_lines tl ON tl.snapshot_id = ms.id AND tl.kind = ?""",
+            (minute, kind)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return empty
+    by_event: dict[int, dict] = {}
+    for r in rows:
+        e = by_event.setdefault(r["event_id"],
+                                {"team1": r["team1"], "team2": r["team2"], "lines": []})
+        e["lines"].append(r)
+    count = wins = 0
+    profit = 0.0
+    for ev in by_event.values():
+        if norm_pair(ev["team1"], ev["team2"]) != target:
+            continue
+        ln = _pick_even_line(ev["lines"])
+        if ln is None:
+            continue                       # рынок этого вида не котировался — не учитываем
+        res = ln["r_m"]
+        if res == "Выигрыш":
+            count += 1
+            wins += 1
+            if ln["m_odds"] is not None:
+                profit += STAKE * (float(ln["m_odds"]) - 1.0)
+        elif res == "Проигрыш":
+            count += 1
+            profit += -STAKE
+        # Возврат / нерасчёт (r_m NULL) — не в счёт
+    staked = count * STAKE
+    roi = (profit / staked * 100) if staked else 0.0
+    return {"count": count, "wins": wins, "profit": profit, "roi": roi}
+
+
 def overall_stats_from_collector(market: str | None = None) -> dict:
     tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
            "profit": 0.0, "staked": 0.0}
