@@ -48,6 +48,9 @@ import export_cage_strat
 import prime_women_db
 import prime_women_signals
 import export_prime_women
+import pro_strat_db
+import pro_strat_signals
+import export_pro_strat
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES,
                     SH_STRAT_CODE, SH_STRAT_LEAGUES, SH_TOTAL_STRAT_CODE,
@@ -56,7 +59,8 @@ from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     SH_PAIR_STRAT_CODE, SH_PAIR_SIDES, SH_PAIR_PREMATCH,
                     PQ_STRAT_CODE, PQ_SIDES,
                     CAGE_STRAT_CODE, CAGE_STRAT_CODE_TM, CAGE_STRAT_CHAT,
-                    CAGE_STRAT_MARKETS, CAGE_STRAT_PREMATCH, PW_STRAT_CODE)
+                    CAGE_STRAT_MARKETS, CAGE_STRAT_PREMATCH, PW_STRAT_CODE,
+                    PRO_STRAT_CODE)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -328,6 +332,7 @@ def strats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Четверти Pro Жен", callback_data="pqstrat")],
         [InlineKeyboardButton("🏀 Стратегия CAGE", callback_data="csstrat")],
         [InlineKeyboardButton("🏀 Стратегия Prime Ж", callback_data="pwstrat")],
+        [InlineKeyboardButton("🏀 Стратегия Pro М", callback_data="prostrat")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
@@ -524,6 +529,7 @@ def stats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Четверти Pro Жен", callback_data="stats_pq")],
         [InlineKeyboardButton("🏀 Стратегия CAGE", callback_data="stats_cs")],
         [InlineKeyboardButton("🏀 Стратегия Prime Ж", callback_data="stats_pw")],
+        [InlineKeyboardButton("🏀 Стратегия Pro М", callback_data="stats_pro")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
@@ -845,6 +851,18 @@ async def _send_pw_report(bot, text: str):
         return False, str(e)
 
 
+async def _send_pro_report(bot, text: str):
+    """Публикует отчёт стратегии Pro М в её чат. (ok, err_text)."""
+    cid = database.get_chat_id(PRO_STRAT_CODE)
+    if cid is None:
+        return False, "chat_id Pro М не задан (задай в «🏀 Стратегия Pro М → Чат стратегии»)."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 # --- планировщик отчётов (без JobQueue: лёгкий asyncio-таск) ----------------
 # JobQueue у PTB требует extra [job-queue]; чтобы не тянуть зависимость на VPS,
 # проверяем время сами раз в минуту. Маркер уже отправленного периода лежит в БД
@@ -1024,6 +1042,30 @@ async def _report_scheduler(app):
                     if ok:
                         database.set_report_marker("pw_monthly", marker)
                         print(f"[REPORT] pw monthly sent for {marker}")
+            # Pro М: дневной каждый день, недельный (Пн), месячный (1-е) — 09:00 МСК.
+            if now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("pro_daily") != marker:
+                    ok, err = await _send_pro_report(app.bot, reports.build_pro_daily_text(now))
+                    if ok:
+                        database.set_report_marker("pro_daily", marker)
+                        print(f"[REPORT] pro daily sent for {marker}")
+                    else:
+                        print(f"[REPORT] pro daily NOT sent: {err}")
+            if now.weekday() == 0 and now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("pro_weekly") != marker:
+                    ok, err = await _send_pro_report(app.bot, reports.build_pro_weekly_text(now))
+                    if ok:
+                        database.set_report_marker("pro_weekly", marker)
+                        print(f"[REPORT] pro weekly sent for {marker}")
+            if now.day == 1 and now.hour >= 9:
+                marker = now.strftime("%Y-%m")
+                if database.get_report_marker("pro_monthly") != marker:
+                    ok, err = await _send_pro_report(app.bot, reports.build_pro_monthly_text(now))
+                    if ok:
+                        database.set_report_marker("pro_monthly", marker)
+                        print(f"[REPORT] pro monthly sent for {marker}")
         except Exception as e:
             print(f"[REPORT sched error] {e}")
         await asyncio.sleep(60)
@@ -2814,6 +2856,310 @@ def pwteams_kb(rid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+# --- стратегия Pro МУЖЧИНЫ (сигнал ТМ, минута, по парам, окно работы) --------
+
+PRO_PAGE = 8   # пар на страницу в экране галочек
+
+
+def parse_pro_minute(raw: str):
+    """Игровая минута сигнала: целое ≥ 0. None при ошибке."""
+    try:
+        m = int(raw.strip())
+    except ValueError:
+        return None
+    return m if m >= 0 else None
+
+
+def prostrat_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 Наборы (минута + пары)", callback_data="prorules")],
+        [InlineKeyboardButton("⚙️ Чат стратегии", callback_data="prochat")],
+        [InlineKeyboardButton("⏰ Время работы", callback_data="prosched")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="prostats")],
+        [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="proreports")],
+        [InlineKeyboardButton("📥 Excel", callback_data="proexport")],
+        [InlineKeyboardButton("🗑 Сброс сигналов", callback_data="proreset_ask")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
+    ])
+
+
+def _pro_chat_line() -> str:
+    cid = database.get_chat_id(PRO_STRAT_CODE)
+    val = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
+    return f"Чат отправки: {val}"
+
+
+def prostrat_text() -> str:
+    rules = pro_strat_db.get_rules()
+    on = sum(1 for r in rules if r["enabled"])
+    return (
+        "🏀 <b>Стратегия Pro М (ТМ)</b>\n"
+        f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}\n"
+        f"{_pro_chat_line()}\n"
+        f"Время работы: {signals.fmt_windows(PRO_STRAT_CODE)} · "
+        f"{signals.window_status(PRO_STRAT_CODE)}\n"
+        f"Наборов: {len(rules)} (включено {on})\n\n"
+        "Набор = минута + галочки пар. Можно несколько наборов с разными минутами. "
+        "На заданной игровой минуте матча Pro муж по отмеченной паре (в окне работы) "
+        "шлётся сигнал ТМ по текущей крайней линии тотала.\n"
+        "⚠️ Список пар берётся из сборщика Pro муж (pro_markets.db) — он должен собирать матчи."
+    )
+
+
+def pro_rule_label(rule: dict) -> str:
+    mark = "✅" if rule["enabled"] else "🚫"
+    return f"{mark} ТМ · мин {rule['minute']} · пар {pro_strat_db.count_pairs(rule['id'])}"
+
+
+def prorules_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(pro_rule_label(r), callback_data=f"prorule:{r['id']}")]
+            for r in pro_strat_db.get_rules()]
+    rows.append([InlineKeyboardButton("➕ Добавить набор", callback_data="proadd")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="prostrat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def prorules_text() -> str:
+    rules = pro_strat_db.get_rules()
+    lines = ["📋 <b>Наборы стратегии Pro М</b>", ""]
+    if not rules:
+        lines.append("Пока пусто. Нажми «➕ Добавить набор».")
+    else:
+        lines.append("Тап по набору — минута/пары/удаление.")
+    return "\n".join(lines)
+
+
+def prorule_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle, callback_data=f"protgl:{rid}")],
+        [InlineKeyboardButton(f"✏️ Минута ({rule['minute']})", callback_data=f"promin:{rid}")],
+        [InlineKeyboardButton(f"☑️ Пары (отмечено {pro_strat_db.count_pairs(rid)})",
+                              callback_data=f"propairs:{rid}")],
+        [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"prodel_ask:{rid}")],
+        [InlineKeyboardButton("⬅️ К наборам", callback_data="prorules")],
+    ])
+
+
+def prorule_text(rule: dict) -> str:
+    st = pro_strat_db.rule_stats_from_collector(rule)
+    lines = [
+        "🏀 <b>Набор Pro М · ТМ</b>",
+        f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
+        "",
+        f"⏱ Минута сигнала: <b>{rule['minute']}</b>",
+        f"🎯 Рынок: <b>ТМ (крайняя линия)</b>",
+        f"☑️ Отмечено пар: <b>{pro_strat_db.count_pairs(rule['id'])}</b>",
+        "",
+        "<b>Статистика по сборщику</b> (гипотетически, по настройкам набора)",
+        f"Матчей: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
+    ]
+    if st["wins"] + st["losses"] > 0:
+        lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+        lines.append(f"Прибыль: {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def confirm_prodel_kb(rule_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"prodel_yes:{rule_id}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"prorule:{rule_id}"),
+    ]])
+
+
+def confirm_proreset_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data="proreset_yes"),
+        InlineKeyboardButton("❌ Отмена", callback_data="prostrat"),
+    ]])
+
+
+def prosched_text() -> str:
+    return (
+        "⏰ <b>Время работы · Pro М</b> (МСК)\n"
+        "Сигналы шлются только внутри окон работы; вне окон стратегия молчит.\n\n"
+        f"Сейчас: <b>{signals.fmt_windows(PRO_STRAT_CODE)}</b>\n"
+        f"Статус: {signals.window_status(PRO_STRAT_CODE)}\n\n"
+        "Нажми «✏️ Изменить» и пришли одно или несколько окон через запятую:\n"
+        "<code>10:00-12:00, 16:00-18:00, 20:00-22:00</code>\n"
+        "или <code>off</code> — круглосуточно."
+    )
+
+
+def prosched_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Изменить", callback_data="prosetsched")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="prostrat")],
+    ])
+
+
+def proreports_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 День", callback_data="prorep:day"),
+         InlineKeyboardButton("неделя", callback_data="prorep:week"),
+         InlineKeyboardButton("месяц", callback_data="prorep:month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="prostrat")],
+    ])
+
+
+def proreports_text() -> str:
+    return (
+        "📈 <b>Отчёты стратегии Pro М</b>\n\n"
+        "Процент прибыли — от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
+        "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
+        "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
+        f"{_pro_chat_line()}\n\n"
+        "Кнопки ниже — отправить вручную сейчас."
+    )
+
+
+def pro_stats_section() -> str:
+    """Блок статистики стратегии Pro М (для общего экрана и экрана статистики).
+
+    Считается ГИПОТЕТИЧЕСКИ по сборщику (pro_markets.db) по настройкам наборов
+    (минута + пары), а не по реально отправленным сигналам."""
+    cid = database.get_chat_id(PRO_STRAT_CODE)
+    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRO М</b> (гипотетически, по сборщику)  "
+             f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
+    rules = pro_strat_db.get_rules()
+    if not rules:
+        lines.append("Наборов ещё нет — добавь в «🏀 Стратегия Pro М».")
+        return "\n".join(lines)
+    tot = pro_strat_db.overall_stats_from_collector()
+    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+                 f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
+    if tot["wins"] + tot["losses"] > 0:
+        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}")
+    for r in rules:
+        st = pro_strat_db.rule_stats_from_collector(r)
+        lines += ["", f"• ТМ · мин {r['minute']} · пар {pro_strat_db.count_pairs(r['id'])}: "
+                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
+        if st["wins"] + st["losses"] > 0:
+            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def prostats_text() -> str:
+    return _bal_line() + pro_stats_section()
+
+
+# --- экран галочек пар Pro М (с поиском/фильтром/пагинацией) ----------------
+
+def _pro_view(ctx, rid: int) -> dict:
+    v = ctx.user_data.get("pro_view")
+    if not v or v.get("rid") != rid:
+        v = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        ctx.user_data["pro_view"] = v
+    return v
+
+
+def _pro_filtered_pairs(view: dict) -> list[tuple[str, str]]:
+    pairs = pro_strat_db.distinct_pairs()
+    f = view.get("filter")
+    if f == "team":
+        t = view["team"].lower()
+        pairs = [p for p in pairs if p[0].lower() == t or p[1].lower() == t]
+    elif f == "search":
+        s = view["search"].lower()
+        pairs = [p for p in pairs if s in p[0].lower() or s in p[1].lower()]
+    elif f == "selected":
+        sel = pro_strat_db.get_rule_pairs(view["rid"])
+        pairs = [p for p in pairs if p in sel]
+    return pairs
+
+
+def _pro_filter_name(view: dict) -> str:
+    f = view.get("filter")
+    if f == "team":
+        return f"команда «{view['team']}»"
+    if f == "search":
+        return f"поиск «{view['search']}»"
+    if f == "selected":
+        return "только отмеченные"
+    return "все пары"
+
+
+def propairs_text(ctx, rid: int) -> str:
+    view = _pro_view(ctx, rid)
+    rule = pro_strat_db.get_rule(rid)
+    pairs = _pro_filtered_pairs(view)
+    total = len(pro_strat_db.distinct_pairs())
+    sel = pro_strat_db.count_pairs(rid)
+    lines = [
+        f"☑️ <b>Пары набора · ТМ · мин {rule['minute'] if rule else '?'}</b>",
+        f"Отмечено: <b>{sel}</b> из {total} пар",
+        f"Фильтр: {_pro_filter_name(view)} — найдено {len(pairs)}",
+        "",
+        "Тап по паре — поставить/снять ✅.",
+    ]
+    if not pairs:
+        lines.append("\nПод фильтр ничего не попало (или сборщик Pro муж ещё пуст).")
+    return "\n".join(lines)
+
+
+def propairs_kb(ctx, rid: int) -> InlineKeyboardMarkup:
+    view = _pro_view(ctx, rid)
+    pairs = _pro_filtered_pairs(view)
+    sel = pro_strat_db.get_rule_pairs(rid)
+
+    pages = max(1, (len(pairs) + PRO_PAGE - 1) // PRO_PAGE)
+    page = max(0, min(view["page"], pages - 1))
+    view["page"] = page
+    start = page * PRO_PAGE
+    chunk = pairs[start:start + PRO_PAGE]
+
+    rows = []
+    for pos, (a, b) in enumerate(chunk, start=start):
+        mark = "✅" if (a, b) in sel else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {pro_strat_db.pair_label(a, b)}",
+                                          callback_data=f"protog:{pos}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data="propg:prev"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="pronop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data="propg:next"))
+    if len(nav) > 1:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton("🔤 По команде", callback_data="proflt_team"),
+        InlineKeyboardButton("🔍 Поиск", callback_data="proflt_search"),
+    ])
+    sel_btn = ("❌ Снять фильтр" if view["filter"] else "☑️ Только отмеченные")
+    sel_cb = ("proflt_none" if view["filter"] else "proflt_sel")
+    rows.append([InlineKeyboardButton(sel_btn, callback_data=sel_cb)])
+    total_all = len(pro_strat_db.distinct_pairs())
+    all_selected = total_all > 0 and pro_strat_db.count_pairs(rid) >= total_all
+    glob_btn = ("🚫 Снять ВСЕ пары" if all_selected else "✅ Отметить ВСЕ пары")
+    glob_cb = ("proallg_off" if all_selected else "proallg_on")
+    rows.append([InlineKeyboardButton(glob_btn, callback_data=glob_cb)])
+    rows.append([
+        InlineKeyboardButton("✔️ Отметить (фильтр)", callback_data="proall_on"),
+        InlineKeyboardButton("✖️ Снять (фильтр)", callback_data="proall_off"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"prorule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def proteams_kb(rid: int) -> InlineKeyboardMarkup:
+    teams = pro_strat_db.distinct_teams()
+    rows, row = [], []
+    for i, t in enumerate(teams):
+        row.append(InlineKeyboardButton(t, callback_data=f"proteam:{i}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ К парам", callback_data=f"propairs:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
 # --- стратегия ЧЕТВЕРТИ Pro Жен (тотал ТБ/ТМ текущей четверти по парам) ------
 
 PQ_PAGE = 8   # пар на страницу в экране галочек
@@ -3175,7 +3521,10 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"• 🏀 CAGE ИТМ2: "
                  f"{_rule_strat_status(cage_strat_db.get_rules('it2'), CAGE_STRAT_CHAT['it2'], 'наборов')}",
                  f"• 🏀 Стратегия Prime Ж: "
-                 f"{_rule_strat_status(prime_women_db.get_rules(), PW_STRAT_CODE, 'наборов')}"]
+                 f"{_rule_strat_status(prime_women_db.get_rules(), PW_STRAT_CODE, 'наборов')}",
+                 f"• 🏀 Стратегия Pro М: "
+                 f"{_rule_strat_status(pro_strat_db.get_rules(), PRO_STRAT_CODE, 'наборов')} · "
+                 f"{signals.window_status(PRO_STRAT_CODE)}"]
         await q.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=back_kb())
 
     elif data == "strats":
@@ -3184,6 +3533,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("sp_view", None)
         ctx.user_data.pop("cs_view", None)
         ctx.user_data.pop("pw_view", None)
+        ctx.user_data.pop("pro_view", None)
         await q.edit_message_text(strats_text(), parse_mode="HTML", reply_markup=strats_kb())
 
     elif data == "stats":
@@ -3212,6 +3562,9 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "stats_pw":
         await q.edit_message_text(pwstats_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
+
+    elif data == "stats_pro":
+        await q.edit_message_text(prostats_text(), parse_mode="HTML", reply_markup=stats_sub_kb())
 
     elif data == "export_sig":
         await q.edit_message_text("⏳ Генерирую Excel…", parse_mode="HTML")
@@ -5015,6 +5368,264 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ Сигналы стратегии Prime Ж очищены.\n\n" + pwstrat_text(),
                                   parse_mode="HTML", reply_markup=pwstrat_kb())
 
+    # --- стратегия Pro М ---------------------------------------------------
+    elif data == "prostrat":
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("pro_view", None)
+        await q.edit_message_text(prostrat_text(), parse_mode="HTML", reply_markup=prostrat_kb())
+
+    elif data == "prorules":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(prorules_text(), parse_mode="HTML", reply_markup=prorules_kb())
+
+    elif data == "proadd":
+        ctx.user_data["await"] = ("pro_rule_new", None)
+        await q.edit_message_text(
+            "➕ <b>Новый набор Pro М · ТМ</b>\n\n"
+            "Пришли <b>игровую минуту</b> сигнала числом, например <code>15</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("prorule:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = pro_strat_db.get_rule(rid)
+        if not rule:
+            await q.edit_message_text(prorules_text(), parse_mode="HTML", reply_markup=prorules_kb())
+            return
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(prorule_text(rule), parse_mode="HTML", reply_markup=prorule_kb(rule))
+
+    elif data.startswith("protgl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pro_strat_db.toggle_rule(rid)
+        rule = pro_strat_db.get_rule(rid)
+        if rule:
+            await q.edit_message_text(prorule_text(rule), parse_mode="HTML", reply_markup=prorule_kb(rule))
+
+    elif data.startswith("promin:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = pro_strat_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("pro_rule_edit", rid)
+        await q.edit_message_text(
+            f"✏️ <b>Минута сигнала</b>\nСейчас: {rule['minute']}\n\n"
+            "Пришли новую игровую минуту числом, например <code>15</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data.startswith("prodel_ask:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = pro_strat_db.get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить набор?</b>\n{pro_rule_label(rule)}\n"
+            "Галочки пар набора тоже удалятся. Отменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_prodel_kb(rid))
+
+    elif data.startswith("prodel_yes:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pro_strat_db.delete_rule(rid)
+        await q.edit_message_text("✅ Набор удалён.\n\n" + prorules_text(),
+                                  parse_mode="HTML", reply_markup=prorules_kb())
+
+    # экран галочек пар Pro М
+    elif data.startswith("propairs:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not pro_strat_db.get_rule(rid):
+            return
+        ctx.user_data.pop("await", None)
+        ctx.user_data["pro_view"] = {"rid": rid, "filter": None, "search": "", "team": "", "page": 0}
+        await q.edit_message_text(propairs_text(ctx, rid), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, rid))
+
+    elif data.startswith("protog:"):
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        try:
+            pos = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pairs = _pro_filtered_pairs(view)
+        if not (0 <= pos < len(pairs)):
+            return
+        a, b = pairs[pos]
+        pro_strat_db.toggle_pair(view["rid"], a, b)
+        await q.edit_message_text(propairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, view["rid"]))
+
+    elif data in ("propg:prev", "propg:next"):
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        view["page"] += (-1 if data.endswith("prev") else 1)
+        await q.edit_message_text(propairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, view["rid"]))
+
+    elif data == "pronop":
+        pass
+
+    elif data == "proflt_none":
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        view.update(filter=None, search="", team="", page=0)
+        await q.edit_message_text(propairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, view["rid"]))
+
+    elif data == "proflt_sel":
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        view.update(filter="selected", page=0)
+        await q.edit_message_text(propairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, view["rid"]))
+
+    elif data == "proflt_search":
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        ctx.user_data["await"] = ("pro_search", view["rid"])
+        await q.edit_message_text(
+            "🔍 <b>Поиск пары</b>\nПришли часть названия команды, например <code>вулв</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "proflt_team":
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        await q.edit_message_text(
+            "🔤 <b>Фильтр по команде</b>\nВыбери команду:",
+            parse_mode="HTML", reply_markup=proteams_kb(view["rid"]))
+
+    elif data.startswith("proteam:"):
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        teams = pro_strat_db.distinct_teams()
+        if not (0 <= idx < len(teams)):
+            return
+        view.update(filter="team", team=teams[idx], page=0)
+        await q.edit_message_text(propairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, view["rid"]))
+
+    elif data in ("proall_on", "proall_off"):
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        pairs = _pro_filtered_pairs(view)
+        pro_strat_db.set_pairs(view["rid"], pairs, enabled=(data == "proall_on"))
+        await q.edit_message_text(propairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, view["rid"]))
+
+    elif data in ("proallg_on", "proallg_off"):
+        view = ctx.user_data.get("pro_view")
+        if not view:
+            return
+        all_pairs = pro_strat_db.distinct_pairs()   # ВСЕ пары, игнорируя фильтр
+        pro_strat_db.set_pairs(view["rid"], all_pairs, enabled=(data == "proallg_on"))
+        await q.edit_message_text(propairs_text(ctx, view["rid"]), parse_mode="HTML",
+                                  reply_markup=propairs_kb(ctx, view["rid"]))
+
+    elif data == "prochat":
+        ctx.user_data["await"] = ("prochat", None)
+        cid = database.get_chat_id(PRO_STRAT_CODE)
+        await q.edit_message_text(
+            "⚙️ <b>Чат стратегии Pro М</b>\n"
+            f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
+            "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "prosched":
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(prosched_text(), parse_mode="HTML", reply_markup=prosched_kb())
+
+    elif data == "prosetsched":
+        ctx.user_data["await"] = ("prosched", PRO_STRAT_CODE)
+        await q.edit_message_text(
+            "⏰ Пришли окна работы (МСК) для <b>Pro М</b>.\n"
+            "Одно или несколько через запятую:\n"
+            "<code>10:00-12:00, 16:00-18:00, 20:00-22:00</code>\n"
+            "или <code>off</code> — круглосуточно.", parse_mode="HTML")
+
+    elif data == "prostats":
+        await q.edit_message_text(prostats_text(), parse_mode="HTML", reply_markup=prostrat_kb())
+
+    elif data == "proreports":
+        await q.edit_message_text(proreports_text(), parse_mode="HTML", reply_markup=proreports_kb())
+
+    elif data.startswith("prorep:"):
+        period = data.split(":", 1)[1]
+        if period == "day":
+            text, title = reports.build_pro_daily_text(), "Дневной"
+        elif period == "week":
+            text, title = reports.build_pro_weekly_text(), "Недельный"
+        else:
+            text, title = reports.build_pro_monthly_text(), "Месячный"
+        ok, err = await _send_pro_report(ctx.bot, text)
+        if ok:
+            head = f"✅ {title} отчёт Pro М отправлен. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=proreports_kb())
+
+    elif data == "proexport":
+        await q.edit_message_text("⏳ Генерирую Excel Pro М…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"pro_strat_signals_{ts}.xlsx"
+        try:
+            n = export_pro_strat.build(str(path))
+            if n == 0:
+                await ctx.bot.send_message(q.message.chat_id,
+                                           "📊 Сигналов Pro М пока нет — нечего выгружать.")
+            else:
+                with open(path, "rb") as fp:
+                    await ctx.bot.send_document(
+                        chat_id=q.message.chat_id, document=fp, filename=path.name,
+                        caption=f"📊 Pro М · сигналов {n}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, prostrat_text(),
+                                   parse_mode="HTML", reply_markup=prostrat_kb())
+
+    elif data == "proreset_ask":
+        await q.edit_message_text(
+            "⚠️ <b>Удалить все сигналы стратегии Pro М?</b>\n"
+            "Наборы и галочки пар не затрагиваются.\nОтменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_proreset_kb())
+
+    elif data == "proreset_yes":
+        pro_strat_db.clear_signals()
+        await q.edit_message_text("✅ Сигналы стратегии Pro М очищены.\n\n" + prostrat_text(),
+                                  parse_mode="HTML", reply_markup=prostrat_kb())
+
     # --- стратегия Четверти Pro Жен ----------------------------------------
     elif data == "pqstrat":
         ctx.user_data.pop("await", None)
@@ -5694,6 +6305,76 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(pwpairs_text(ctx, rid), parse_mode="HTML",
                                         reply_markup=pwpairs_kb(ctx, rid))
 
+    # --- стратегия Pro М ---
+    elif kind == "prochat":
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_chat_id(PRO_STRAT_CODE, cid)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Стратегия Pro М → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=prostrat_kb())
+
+    elif kind == "prosched":
+        value, ok = parse_windows_input(raw)
+        if not ok:
+            await update.message.reply_text(
+                "❌ Формат: <code>10:00-12:00, 16:00-18:00</code> или <code>off</code>.",
+                parse_mode="HTML")
+            return
+        database.set_windows(PRO_STRAT_CODE, value)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Pro М → время работы {signals.fmt_windows(PRO_STRAT_CODE)}.",
+            parse_mode="HTML", reply_markup=prostrat_kb())
+
+    elif kind == "pro_rule_new":
+        minute = parse_pro_minute(raw)
+        if minute is None:
+            await update.message.reply_text(
+                "❌ Минута — целое число ≥ 0, например <code>15</code>. Ещё раз или /start.",
+                parse_mode="HTML")
+            return
+        rid = pro_strat_db.add_rule(minute)
+        ctx.user_data.pop("await", None)
+        rule = pro_strat_db.get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Набор создан: <b>ТМ</b> · мин {minute}.\n"
+            "Теперь отметь пары кнопкой «☑️ Пары».",
+            parse_mode="HTML", reply_markup=prorule_kb(rule))
+
+    elif kind == "pro_rule_edit":
+        rid = code                                   # code здесь = id набора
+        minute = parse_pro_minute(raw)
+        if minute is None:
+            await update.message.reply_text(
+                "❌ Минута — целое число ≥ 0, например <code>15</code>. Ещё раз или /start.",
+                parse_mode="HTML")
+            return
+        if not pro_strat_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        pro_strat_db.update_rule(rid, minute)
+        ctx.user_data.pop("await", None)
+        rule = pro_strat_db.get_rule(rid)
+        await update.message.reply_text(
+            "✅ Набор изменён.\n\n" + prorule_text(rule),
+            parse_mode="HTML", reply_markup=prorule_kb(rule))
+
+    elif kind == "pro_search":
+        rid = code                                   # code здесь = id набора
+        if not pro_strat_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        view = _pro_view(ctx, rid)
+        view.update(filter="search", search=raw, page=0)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(propairs_text(ctx, rid), parse_mode="HTML",
+                                        reply_markup=propairs_kb(ctx, rid))
+
     # --- стратегия Четверти Pro Жен ---
     elif kind == "pqchat":
         try:
@@ -5784,6 +6465,7 @@ def main():
     pq_db.init_db()
     cage_strat_db.init_db()
     prime_women_db.init_db()
+    pro_strat_db.init_db()
     # Миграция: старый единый чат Prime (prime_strat) переносим в чат ТМ, если тот
     # ещё не задан. Чтобы после раздельных чатов не потерять текущую настройку.
     _old_prime_chat = database.get_chat_id(PRIME_STRAT_CODE)

@@ -31,10 +31,12 @@ import prime_db
 import prime_signals
 import prime_women_db
 import prime_women_signals
+import pro_strat_db
+import pro_strat_signals
 from config import (LINE_SERVERS, HEADERS, SCOPE_MARKET, POLL_INTERVAL, MAX_WORKERS,
                     LEAGUES, HALFTIME_TS, HALFTIME_TOL_AFTER, MATCH_TOTAL_FIDS,
                     COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES, PRIME_STRAT_LEAGUE,
-                    PQ_STRAT_LEAGUE, PW_STRAT_LEAGUE)
+                    PQ_STRAT_LEAGUE, PW_STRAT_LEAGUE, PRO_STRAT_LEAGUE)
 
 log = logging.getLogger("parser")
 MSK = timezone(timedelta(hours=3))
@@ -164,6 +166,8 @@ def _finalize(eid: int, comment: str = ""):
         prime_signals.resolve(eid, s1, s2)
     if sid == PW_STRAT_LEAGUE:
         prime_women_signals.resolve(eid, s1, s2)
+    if sid == PRO_STRAT_LEAGUE:
+        pro_strat_signals.resolve(eid, s1, s2)
     if sid == PQ_STRAT_LEAGUE:
         pq_signals.resolve(eid, quarters, s1, s2)
     _known.pop(eid, None)
@@ -284,6 +288,12 @@ def run_cycle() -> list[dict]:
                 prime_women_signals.process_match(state, api_map.get(eid))
             except Exception as e:
                 log.warning("prime_women_signals err ev=%s: %s", eid, e)
+
+        if meta["sportId"] == PRO_STRAT_LEAGUE:
+            try:
+                pro_strat_signals.process_match(state, api_map.get(eid))
+            except Exception as e:
+                log.warning("pro_strat_signals err ev=%s: %s", eid, e)
 
         if meta["sportId"] == PQ_STRAT_LEAGUE:
             try:
