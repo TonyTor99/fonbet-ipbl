@@ -479,7 +479,6 @@ def strategy_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [toggle],
         [InlineKeyboardButton("📋 Наборы IPBL (чат+запасы+график+дни+пары+ЧС)", callback_data="ibrules")],
-        [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
         [InlineKeyboardButton("⏰ Время работы (Prime-перерыв)", callback_data="sched")],
         [InlineKeyboardButton("📥 Выгрузить снимки перерывов (Excel)", callback_data="export_sig")],
         [InlineKeyboardButton("🗑 Сбросить БД стратегий", callback_data="reset_ask")],
