@@ -831,14 +831,53 @@ def _ipbl_empty_stats() -> dict:
             "winrate": 0.0, "profit": 0.0, "staked": 0.0, "roi": 0.0}
 
 
+def _ipbl_in_schedule(rule: dict, created_at: str) -> bool:
+    """Попадает ли время снимка (created_at 'YYYY-MM-DD HH:MM:SS', МСК) в график
+    работы набора: день недели в наборе (пусто/все 7 = все дни) И время в одном из
+    окон (пусто = круглосуточно). Для гипотетической статистики — чтобы она совпадала
+    с тем, что набор РЕАЛЬНО отправляет (и с бэктестом веб-панели)."""
+    if not created_at:
+        return True
+    wd = rule.get("weekdays")
+    days = {int(x) for x in (wd or "").split(",") if x.strip().isdigit()}
+    if days and len(days) < 7:
+        try:
+            d = datetime.strptime(created_at[:10], "%Y-%m-%d")
+        except ValueError:
+            d = None
+        if d is not None and d.weekday() not in days:
+            return False
+    wins = rule.get("windows")
+    if wins:
+        hm = created_at[11:16]                      # 'HH:MM' (строки zero-padded → лексикосравнение ок)
+        if len(hm) < 5:
+            return True
+        inw = False
+        for part in wins.split(","):
+            part = part.strip()
+            if "-" not in part:
+                continue
+            s, e = [x.strip() for x in part.split("-", 1)]
+            if s <= e:
+                if s <= hm <= e:
+                    inw = True; break
+            else:                                    # окно через полночь
+                if hm >= s or hm <= e:
+                    inw = True; break
+        if not inw:
+            return False
+    return True
+
+
 def ipbl_rule_stats_from_history(rule: dict) -> dict:
     """Бэктест набора по истории перерывов (таблица signals): берём рассчитанные
     снимки ТМ (result В/П, есть линия и кф), для каждого определяем дивизион, берём
     запас набора по этому дивизиону (None = дивизион выключен → пропуск), проверяем
-    формулу (formula_value <= запас) и фильтр пар (белый+чёрный). Прибыль флэт STAKE."""
+    формулу (formula_value <= запас), фильтр пар (белый+чёрный) И график/дни набора
+    (как при реальной отправке — чтобы совпадало с веб-панелью). Прибыль флэт STAKE."""
     conn = _conn()
     rows = conn.execute(
-        "SELECT team1, team2, division, league, formula_value, odds, result "
+        "SELECT team1, team2, division, league, formula_value, odds, result, created_at "
         "FROM signals WHERE strategy='signal_tm' AND result IN ('Выигрыш','Проигрыш') "
         "AND line IS NOT NULL AND odds IS NOT NULL AND formula_value IS NOT NULL").fetchall()
     conn.close()
@@ -858,6 +897,8 @@ def ipbl_rule_stats_from_history(rule: dict) -> dict:
             continue
         if pair in blk.get(div, set()):
             continue
+        if not _ipbl_in_schedule(rule, r["created_at"]):
+            continue                                 # вне графика/дней набора — не в счёт
         if r["result"] == "Выигрыш":
             wins += 1
             profit += STAKE * (float(r["odds"]) - 1.0)
