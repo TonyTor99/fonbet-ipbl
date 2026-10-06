@@ -649,28 +649,39 @@ def _rule_strat_status(rules, chat_code: str, unit: str) -> str:
     return f"🟢 активна ({n} {unit})"
 
 
+def _prime_overview(market: str) -> str:
+    """Короткий статус рынка Prime для экрана «Статус» (чат теперь у набора)."""
+    rules = prime_db.get_rules(market)
+    if not rules:
+        return "⚪ нет наборов"
+    on = sum(1 for r in rules if r["enabled"])
+    no_chat = sum(1 for r in rules if r["chat_id"] is None)
+    s = f"🟢 наборов {len(rules)} (вкл {on})"
+    if no_chat:
+        s += f", 🔕 без чата {no_chat}"
+    return s
+
+
 def _prime_market_block(market: str) -> list[str]:
-    """Блок статистики одного рынка Prime (ТМ или ИТМ1) — свой чат/сброс/отчёт."""
+    """Блок статистики одного рынка Prime (ТМ или ИТМ1). Считается ГИПОТЕТИЧЕСКИ по
+    сборщику (prime_markets.db) по условиям наборов (минута + пары), чат — у набора."""
     label = PRIME_MARKETS.get(market, market)
-    cid = database.get_chat_id(PRIME_STRAT_CHAT[market])
-    lines = ["", f"🏀 <b>PRIME · {label}</b>  "
-             f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
+    lines = ["", f"🏀 <b>PRIME · {label}</b> (гипотетически, по сборщику)"]
     rules = prime_db.get_rules(market)
     if not rules:
         lines.append("Наборов ещё нет.")
         return lines
-    tot = prime_db.overall_stats(market)
-    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+    tot = prime_db.overall_stats_from_collector(market)
+    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}")
     for r in rules:
-        st = prime_db.rule_stats(r["id"])
-        if st["signals"] == 0:
-            continue
-        lines += ["", f"• мин {r['minute']} · пар {prime_db.count_pairs(r['id'])}: "
-                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        st = prime_db.rule_stats_from_collector(r)
+        cmark = "" if r["chat_id"] is not None else " 🔕"
+        lines += ["", f"• мин {r['minute']} · пар {prime_db.count_pairs(r['id'])}{cmark}: "
+                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
             lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
@@ -790,12 +801,11 @@ async def send_monthly_report(bot):
     return await _send_report(bot, reports.build_monthly_text())
 
 
-async def _send_prime_report(bot, text: str, market: str):
-    """Публикует отчёт Prime в чат нужного рынка (ТМ/ИТМ1). (ok, err_text)."""
-    cid = database.get_chat_id(PRIME_STRAT_CHAT[market])
+async def _send_prime_report(bot, text: str, rule: dict):
+    """Публикует отчёт набора Prime в ЕГО чат (rule.chat_id). (ok, err_text)."""
+    cid = rule.get("chat_id")
     if cid is None:
-        label = PRIME_MARKETS.get(market, market)
-        return False, f"chat_id Prime {label} не задан (задай в «🏀 Стратегия Prime → Чат {label}»)."
+        return False, "у набора не задан чат (задай в наборе «⚙️ Чат»)."
     try:
         await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
         return True, None
@@ -904,37 +914,38 @@ async def _report_scheduler(app):
                     else:
                         print(f"[REPORT] monthly NOT sent: {err}")
             # Prime: дневной каждый день, недельный (Пн) и месячный (1-е) — с 09:00 МСК.
-            # Отдельно на каждый рынок (ТМ / ИТМ1) в свой чат, свои маркеры.
-            for mk in PRIME_MARKETS:
+            # ПЕР-НАБОРНО: каждый набор считается и уходит в СВОЙ чат, свои маркеры.
+            for r in prime_db.get_rules():
+                rid = r["id"]
                 if now.hour >= 9:
                     marker = now.strftime("%Y-%m-%d")
-                    key = f"prime_daily_{mk}"
+                    key = f"prime_daily_{rid}"
                     if database.get_report_marker(key) != marker:
                         ok, err = await _send_prime_report(
-                            app.bot, reports.build_prime_daily_text(now, market=mk), mk)
+                            app.bot, reports.build_prime_rule_daily_text(r, now), r)
                         if ok:
                             database.set_report_marker(key, marker)
-                            print(f"[REPORT] prime {mk} daily sent for {marker}")
+                            print(f"[REPORT] prime rule {rid} daily sent for {marker}")
                         else:
-                            print(f"[REPORT] prime {mk} daily NOT sent: {err}")
+                            print(f"[REPORT] prime rule {rid} daily NOT sent: {err}")
                 if now.weekday() == 0 and now.hour >= 9:
                     marker = now.strftime("%Y-%m-%d")
-                    key = f"prime_weekly_{mk}"
+                    key = f"prime_weekly_{rid}"
                     if database.get_report_marker(key) != marker:
                         ok, err = await _send_prime_report(
-                            app.bot, reports.build_prime_weekly_text(now, market=mk), mk)
+                            app.bot, reports.build_prime_rule_weekly_text(r, now), r)
                         if ok:
                             database.set_report_marker(key, marker)
-                            print(f"[REPORT] prime {mk} weekly sent for {marker}")
+                            print(f"[REPORT] prime rule {rid} weekly sent for {marker}")
                 if now.day == 1 and now.hour >= 9:
                     marker = now.strftime("%Y-%m")
-                    key = f"prime_monthly_{mk}"
+                    key = f"prime_monthly_{rid}"
                     if database.get_report_marker(key) != marker:
                         ok, err = await _send_prime_report(
-                            app.bot, reports.build_prime_monthly_text(now, market=mk), mk)
+                            app.bot, reports.build_prime_rule_monthly_text(r, now), r)
                         if ok:
                             database.set_report_marker(key, marker)
-                            print(f"[REPORT] prime {mk} monthly sent for {marker}")
+                            print(f"[REPORT] prime rule {rid} monthly sent for {marker}")
             # ШХ · Пары: дневной каждый день, недельный (Пн) и месячный (1-е) — с 09:00 МСК.
             if now.hour >= 9:
                 marker = now.strftime("%Y-%m-%d")
@@ -1632,9 +1643,7 @@ PM_PAGE = 8   # пар на страницу в экране галочек
 
 def pmstrat_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Наборы (рынок+минута+пары)", callback_data="pmrules")],
-        [InlineKeyboardButton("⚙️ Чат ТМ", callback_data="pmchat:tm"),
-         InlineKeyboardButton("⚙️ Чат ИТМ1", callback_data="pmchat:it1")],
+        [InlineKeyboardButton("📋 Наборы (рынок+минута+чат+график+дни+пары)", callback_data="pmrules")],
         [InlineKeyboardButton("📊 Статистика", callback_data="pmstats")],
         [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data="pmreports")],
         [InlineKeyboardButton("📥 Excel ТМ", callback_data="pmexport:tm"),
@@ -1645,27 +1654,21 @@ def pmstrat_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def _prime_chat_line(market: str) -> str:
-    label = PRIME_MARKETS.get(market, market)
-    cid = database.get_chat_id(PRIME_STRAT_CHAT[market])
-    val = f"<code>{cid}</code>" if cid is not None else "❗️ не задан"
-    return f"Чат {label}: {val}"
-
-
 def pmstrat_text() -> str:
     rules = prime_db.get_rules()
     on = sum(1 for r in rules if r["enabled"])
+    no_chat = sum(1 for r in rules if r["chat_id"] is None)
+    warn = f"\n⚠️ Наборов без чата: {no_chat} (сигналы копятся в БД, но не шлются)." if no_chat else ""
     return (
         "🏀 <b>Стратегия Prime (ТМ / ИТМ1)</b>\n"
         f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}\n"
-        f"{_prime_chat_line('tm')}\n"
-        f"{_prime_chat_line('it1')}\n"
         f"Наборов: {len(rules)} (включено {on})\n\n"
-        "ТМ и ИТМ1 — два независимых варианта: шлют в свои чаты, считаются и "
-        "сбрасываются раздельно (БД одна, разделение по рынку).\n"
-        "Набор = рынок + минута + галочки пар. На заданной игровой минуте матча "
-        "Prime муж по отмеченной паре шлётся сигнал по текущей крайней линии рынка.\n"
-        "⚠️ Список пар берётся из сборщика Prime муж — он должен собирать матчи."
+        "Набор = рынок + минута + <b>свой чат</b> + <b>свой график по часам</b> + "
+        "<b>свои дни недели</b> + галочки пар. На заданной игровой минуте матча Prime "
+        "муж по отмеченной паре (в свой график/дни) шлётся сигнал по текущей крайней "
+        "линии рынка в чат набора.\n"
+        "Статистика набора считается по сборщику (prime_markets.db), отчёты — в чат набора."
+        f"{warn}"
     )
 
 
@@ -1679,8 +1682,9 @@ def pmrules_kb() -> InlineKeyboardMarkup:
 
 def pm_rule_label(rule: dict) -> str:
     mark = "✅" if rule["enabled"] else "🚫"
+    chat = "" if rule["chat_id"] is not None else " 🔕"
     return (f"{mark} {prime_signals.market_label(rule['market'])} · мин {rule['minute']} · "
-            f"пар {prime_db.count_pairs(rule['id'])}")
+            f"пар {prime_db.count_pairs(rule['id'])}{chat}")
 
 
 def pmrules_text() -> str:
@@ -1703,11 +1707,17 @@ def pmadd_kb() -> InlineKeyboardMarkup:
 def pmrule_kb(rule: dict) -> InlineKeyboardMarkup:
     rid = rule["id"]
     toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
+    chat_lbl = (f"⚙️ Чат: {rule['chat_id']}" if rule["chat_id"] is not None else "⚙️ Чат: не задан")
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(toggle, callback_data=f"pmtgl:{rid}")],
         [InlineKeyboardButton(f"🔀 Рынок: {prime_signals.market_label(rule['market'])} → сменить",
                               callback_data=f"pmmk:{rid}")],
         [InlineKeyboardButton(f"✏️ Минута ({rule['minute']})", callback_data=f"pmmin:{rid}")],
+        [InlineKeyboardButton(chat_lbl, callback_data=f"pmrchat:{rid}")],
+        [InlineKeyboardButton(f"⏰ Время работы: {prime_signals.fmt_windows(rule)}",
+                              callback_data=f"pmrsched:{rid}")],
+        [InlineKeyboardButton(f"📅 Дни: {prime_signals.fmt_weekdays(rule)}",
+                              callback_data=f"pmrdays:{rid}")],
         [InlineKeyboardButton(f"☑️ Пары (отмечено {prime_db.count_pairs(rid)})",
                               callback_data=f"pmpairs:{rid}")],
         [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"pmdel_ask:{rid}")],
@@ -1716,23 +1726,55 @@ def pmrule_kb(rule: dict) -> InlineKeyboardMarkup:
 
 
 def pmrule_text(rule: dict) -> str:
-    st = prime_db.rule_stats(rule["id"])
+    # Статистика — ГИПОТЕТИЧЕСКИ по сборщику (prime_markets.db) по условиям набора.
+    st = prime_db.rule_stats_from_collector(rule)
+    chat = f"<code>{rule['chat_id']}</code>" if rule["chat_id"] is not None else "❗️ не задан"
     lines = [
         f"🏀 <b>Набор · {prime_signals.market_label(rule['market'])}</b>",
         f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
         "",
         f"⏱ Минута сигнала: <b>{rule['minute']}</b>",
         f"🎯 Рынок: <b>{prime_signals.market_label(rule['market'])}</b>",
+        f"⚙️ Чат рассылки: {chat}",
+        f"⏰ Время работы: <b>{prime_signals.fmt_windows(rule)}</b>",
+        f"📅 Дни недели: <b>{prime_signals.fmt_weekdays(rule)}</b>",
         f"☑️ Отмечено пар: <b>{prime_db.count_pairs(rule['id'])}</b>",
         "",
-        "<b>Статистика</b>",
-        f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+        "<b>Статистика по сборщику</b> (гипотетически, по условиям набора)",
+        f"Матчей: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
         f"↩️ {st['pushes']} | ⏸️ {st['no_result']}",
     ]
     if st["wins"] + st["losses"] > 0:
         lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
         lines.append(f"Прибыль: {money(st['profit'])}")
     return "\n".join(lines)
+
+
+# Дни недели для экрана выбора (индекс 0=Пн … 6=Вс, как date.weekday()).
+def pmdays_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    sel = prime_signals.parse_weekdays(rule.get("weekdays"))
+    rows, row = [], []
+    for i, name in enumerate(prime_signals.WEEKDAYS_RU):
+        mark = "✅" if (not sel or len(sel) == 7 or i in sel) else "⬜"
+        row.append(InlineKeyboardButton(f"{mark} {name}", callback_data=f"pmday:{rid}:{i}"))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("📅 Все дни", callback_data=f"pmdayall:{rid}")])
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"pmrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def pmdays_text(rule: dict) -> str:
+    return (
+        f"📅 <b>Дни недели набора · {prime_signals.market_label(rule['market'])} · "
+        f"мин {rule['minute']}</b>\n"
+        f"Сейчас: <b>{prime_signals.fmt_weekdays(rule)}</b>\n\n"
+        "Тап по дню — вкл/выкл. Набор работает только в отмеченные дни "
+        "(все отмечены или ни одного = работает все дни)."
+    )
 
 
 def confirm_pmdel_kb(rule_id: int) -> InlineKeyboardMarkup:
@@ -1750,19 +1792,23 @@ def confirm_pmreset_kb(market: str) -> InlineKeyboardMarkup:
 
 
 def pmreports_kb() -> InlineKeyboardMarkup:
-    """Отчёты по каждому рынку отдельно — уходят в чат своего рынка."""
+    """Отчёты по каждому НАБОРУ отдельно — уходят в чат своего набора."""
     rows = []
-    for mk, label in PRIME_MARKETS.items():
+    for r in prime_db.get_rules():
+        tag = f"{prime_signals.market_label(r['market'])} м{r['minute']}"
         rows.append([
-            InlineKeyboardButton(f"📤 {label}: день", callback_data=f"pmrep:{mk}:day"),
-            InlineKeyboardButton("неделя", callback_data=f"pmrep:{mk}:week"),
-            InlineKeyboardButton("месяц", callback_data=f"pmrep:{mk}:month"),
+            InlineKeyboardButton(f"📤 {tag}: день", callback_data=f"pmrep:{r['id']}:day"),
+            InlineKeyboardButton("нед", callback_data=f"pmrep:{r['id']}:week"),
+            InlineKeyboardButton("мес", callback_data=f"pmrep:{r['id']}:month"),
         ])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pmstrat")])
     return InlineKeyboardMarkup(rows)
 
 
 def pmreports_text() -> str:
+    rules = prime_db.get_rules()
+    tail = ("Наборов ещё нет — добавь набор и задай ему чат."
+            if not rules else "Кнопки ниже — отправить отчёт набора в его чат вручную сейчас.")
     return (
         "📈 <b>Отчёты стратегии Prime</b>\n\n"
         "Процент прибыли — от банка "
@@ -1770,10 +1816,8 @@ def pmreports_text() -> str:
         "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
         "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
         "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
-        "ТМ и ИТМ1 считаются и уходят раздельно, каждый в свой чат:\n"
-        f"{_prime_chat_line('tm')}\n"
-        f"{_prime_chat_line('it1')}\n\n"
-        "Кнопки ниже — отправить вручную сейчас."
+        "Каждый набор считается и уходит в СВОЙ чат.\n\n"
+        f"{tail}"
     )
 
 
@@ -3502,10 +3546,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  "",
                  "<b>Стратегии</b>",
                  f"• 🏀 Стратегия IPBL: {signals.window_status('signal_tm')}",
-                 f"• 🏀 Prime ТМ: "
-                 f"{_rule_strat_status(prime_db.get_rules('tm'), PRIME_STRAT_CODE_TM, 'наборов')}",
-                 f"• 🏀 Prime ИТМ1: "
-                 f"{_rule_strat_status(prime_db.get_rules('it1'), PRIME_STRAT_CODE_IT1, 'наборов')}",
+                 f"• 🏀 Prime ТМ: {_prime_overview('tm')}",
+                 f"• 🏀 Prime ИТМ1: {_prime_overview('it1')}",
                  f"• 🏒 Стратегия хоккея: "
                  f"{_rule_strat_status(database.sh_get_rules(), SH_STRAT_CODE, 'правил')}",
                  f"• 🏒 Стратегия тоталов: "
@@ -4449,18 +4491,82 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(pmpairs_text(ctx, view["rid"]), parse_mode="HTML",
                                   reply_markup=pmpairs_kb(ctx, view["rid"]))
 
-    elif data.startswith("pmchat:"):
-        market = data.split(":", 1)[1]
-        if market not in PRIME_MARKETS:
+    elif data.startswith("pmrchat:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
             return
-        ctx.user_data["await"] = ("pmchat", market)
-        cid = database.get_chat_id(PRIME_STRAT_CHAT[market])
-        label = PRIME_MARKETS[market]
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("pm_rule_chat", rid)
+        cur = rule["chat_id"] if rule["chat_id"] is not None else "не задан"
         await q.edit_message_text(
-            f"⚙️ <b>Чат Prime · {label}</b>\n"
-            f"Сейчас: {cid if cid is not None else 'не задан'}\n\n"
+            f"⚙️ <b>Чат набора · {prime_signals.market_label(rule['market'])} · "
+            f"мин {rule['minute']}</b>\n"
+            f"Сейчас: {cur}\n\n"
             "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
-            "Отмена — /start", parse_mode="HTML")
+            "Чтобы убрать чат — пришли <code>off</code>.\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pmrsched:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("pm_rule_sched", rid)
+        await q.edit_message_text(
+            f"⏰ <b>Время работы набора · {prime_signals.market_label(rule['market'])} · "
+            f"мин {rule['minute']}</b> (МСК)\n"
+            f"Сейчас: <b>{prime_signals.fmt_windows(rule)}</b>\n\n"
+            "Пришли одно или несколько окон через запятую:\n"
+            "<code>10:00-12:00, 16:00-18:00, 20:00-22:00</code>\n"
+            "или <code>off</code> — круглосуточно.\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pmrdays:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(pmdays_text(rule), parse_mode="HTML",
+                                  reply_markup=pmdays_kb(rule))
+
+    elif data.startswith("pmday:"):
+        try:
+            _, srid, sidx = data.split(":", 2)
+            rid, idx = int(srid), int(sidx)
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule or not (0 <= idx <= 6):
+            return
+        sel = prime_signals.parse_weekdays(rule.get("weekdays"))
+        if not sel:                       # пусто = все дни → старт от полного набора
+            sel = set(range(7))
+        sel ^= {idx}                      # переключаем день
+        # все 7 или пусто -> храним как «все дни» (None)
+        new = None if (not sel or len(sel) == 7) else ",".join(str(i) for i in sorted(sel))
+        prime_db.update_rule_weekdays(rid, new)
+        rule = prime_db.get_rule(rid)
+        await q.edit_message_text(pmdays_text(rule), parse_mode="HTML",
+                                  reply_markup=pmdays_kb(rule))
+
+    elif data.startswith("pmdayall:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not prime_db.get_rule(rid):
+            return
+        prime_db.update_rule_weekdays(rid, None)   # все дни
+        rule = prime_db.get_rule(rid)
+        await q.edit_message_text(pmdays_text(rule), parse_mode="HTML",
+                                  reply_markup=pmdays_kb(rule))
 
     elif data == "pmstats":
         await q.edit_message_text(pmstats_text(), parse_mode="HTML", reply_markup=pmstrat_kb())
@@ -4469,19 +4575,25 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(pmreports_text(), parse_mode="HTML", reply_markup=pmreports_kb())
 
     elif data.startswith("pmrep:"):
-        _, market, period = data.split(":", 2)
-        if market not in PRIME_MARKETS:
+        try:
+            _, srid, period = data.split(":", 2)
+            rid = int(srid)
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            await q.edit_message_text(pmreports_text(), parse_mode="HTML", reply_markup=pmreports_kb())
             return
         if period == "day":
-            text, title = reports.build_prime_daily_text(market=market), "Дневной"
+            text, title = reports.build_prime_rule_daily_text(rule), "Дневной"
         elif period == "week":
-            text, title = reports.build_prime_weekly_text(market=market), "Недельный"
+            text, title = reports.build_prime_rule_weekly_text(rule), "Недельный"
         else:
-            text, title = reports.build_prime_monthly_text(market=market), "Месячный"
-        ok, err = await _send_prime_report(ctx.bot, text, market)
-        label = PRIME_MARKETS[market]
+            text, title = reports.build_prime_rule_monthly_text(rule), "Месячный"
+        ok, err = await _send_prime_report(ctx.bot, text, rule)
+        tag = f"{prime_signals.market_label(rule['market'])} м{rule['minute']}"
         if ok:
-            head = f"✅ {title} отчёт Prime {label} отправлен. Текст:\n\n<code>{text}</code>"
+            head = f"✅ {title} отчёт Prime {tag} отправлен. Текст:\n\n<code>{text}</code>"
         else:
             head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
         await q.edit_message_text(head, parse_mode="HTML", reply_markup=pmreports_kb())
@@ -6059,18 +6171,50 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("✅ Готово.", reply_markup=shtrules_kb())
 
-    elif kind == "pmchat":
+    elif kind == "pm_rule_chat":
+        rid = code                                   # code здесь = id набора
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            ctx.user_data.pop("await", None)
+            return
+        if raw.strip().lower() in ("off", "-", "убрать", "нет"):
+            prime_db.update_rule_chat(rid, None)
+            ctx.user_data.pop("await", None)
+            rule = prime_db.get_rule(rid)
+            await update.message.reply_text(
+                "✅ Чат набора убран (сигналы копятся в БД, но не шлются).\n\n" + pmrule_text(rule),
+                parse_mode="HTML", reply_markup=pmrule_kb(rule))
+            return
         try:
             cid = int(raw)
         except ValueError:
-            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            await update.message.reply_text("❌ chat_id должен быть числом (или <code>off</code>). "
+                                            "Ещё раз или /start.", parse_mode="HTML")
             return
-        market = code if code in PRIME_MARKETS else "tm"
-        database.set_chat_id(PRIME_STRAT_CHAT[market], cid)
+        prime_db.update_rule_chat(rid, cid)
         ctx.user_data.pop("await", None)
+        rule = prime_db.get_rule(rid)
         await update.message.reply_text(
-            f"✅ Prime {PRIME_MARKETS[market]} → chat_id <code>{cid}</code>.",
-            parse_mode="HTML", reply_markup=pmstrat_kb())
+            f"✅ Чат набора → <code>{cid}</code>.\n\n" + pmrule_text(rule),
+            parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
+    elif kind == "pm_rule_sched":
+        rid = code                                   # code здесь = id набора
+        if not prime_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        value, ok = parse_windows_input(raw)
+        if not ok:
+            await update.message.reply_text(
+                "❌ Формат: <code>10:00-12:00, 16:00-18:00</code> или <code>off</code>.",
+                parse_mode="HTML")
+            return
+        prime_db.update_rule_windows(rid, value)
+        ctx.user_data.pop("await", None)
+        rule = prime_db.get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Время работы набора → {prime_signals.fmt_windows(rule)}.\n\n" + pmrule_text(rule),
+            parse_mode="HTML", reply_markup=pmrule_kb(rule))
 
     elif kind == "pm_rule_new":
         market = code                                # code здесь = рынок ('tm'|'it1')
@@ -6472,6 +6616,16 @@ def main():
     if _old_prime_chat is not None and database.get_chat_id(PRIME_STRAT_CODE_TM) is None:
         database.set_chat_id(PRIME_STRAT_CODE_TM, _old_prime_chat)
         print(f"[MIGRATE] prime_strat chat {_old_prime_chat} -> prime_strat_tm")
+    # Миграция ОДНОКРАТНО: чат рассылки переехал на уровень НАБОРА. Существующим
+    # наборам без чата проставляем текущий чат их рынка (ТМ/ИТМ1) как значение по
+    # умолчанию. Через маркер — чтобы снятие чата («off») не перетиралось при рестарте.
+    if database.get_report_marker("prime_rule_chat_migrated") != "1":
+        for _r in prime_db.rules_without_chat():
+            _mk_chat = database.get_chat_id(PRIME_STRAT_CHAT.get(_r["market"], ""))
+            if _mk_chat is not None:
+                prime_db.update_rule_chat(_r["id"], _mk_chat)
+        database.set_report_marker("prime_rule_chat_migrated", "1")
+        print("[MIGRATE] prime rule chats set from market defaults")
     # Миграция: старый единый чат CAGE (cage_strat) переносим в чат ТМ, если не задан.
     _old_cage_chat = database.get_chat_id(CAGE_STRAT_CODE)
     if _old_cage_chat is not None and database.get_chat_id(CAGE_STRAT_CODE_TM) is None:

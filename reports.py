@@ -109,37 +109,37 @@ def build_monthly_text(now: datetime | None = None) -> str:
 
 
 # ===========================================================================
-# Отчёты стратегии PRIME (отдельный источник — prime_db, отдельный чат).
-# День / неделя / месяц, тот же формат %% от банка.
+# Отчёты стратегии PRIME (отдельный источник — prime_db). ПЕР-НАБОРНЫЕ: каждый
+# набор считается и уходит в СВОЙ чат (prime_rules.chat_id). День/нед/мес, %% от банка.
 # ===========================================================================
-# Шапка отчёта на каждый рынок Prime (ТМ / ИТМ1 идут в свои чаты).
-PRIME_HEADERS = {"tm": "Стратегия Prime · ТМ", "it1": "Стратегия Prime · ИТМ1"}
+PRIME_MARKETS = {"tm": "ТМ", "it1": "ИТМ1"}
 
 
-def _prime_header(market: str) -> str:
-    return PRIME_HEADERS.get(market, "Стратегия Prime")
+def _prime_rule_header(rule: dict) -> str:
+    label = PRIME_MARKETS.get(rule.get("market"), rule.get("market"))
+    return f"Стратегия Prime · {label} · мин {rule.get('minute')}"
 
 
-def build_prime_daily_text(now: datetime | None = None, day: date | None = None,
-                           market: str = "tm") -> str:
-    """Отчёт за один день (по умолчанию — вчера, как при авто-отправке в 09:00)."""
+def build_prime_rule_daily_text(rule: dict, now: datetime | None = None,
+                                day: date | None = None) -> str:
+    """Отчёт набора за один день (по умолчанию — вчера, как при авто-отправке в 09:00)."""
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
-    total = prime_db.profit_total(day.isoformat(), day.isoformat(), market)
+    total = prime_db.profit_total_rule(rule["id"], day.isoformat(), day.isoformat())
     return "\n".join([
-        _prime_header(market),
+        _prime_rule_header(rule),
         GREETING,
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
 
-def build_prime_weekly_text(now: datetime | None = None, market: str = "tm") -> str:
+def build_prime_rule_weekly_text(rule: dict, now: datetime | None = None) -> str:
     now = now or datetime.now(MSK)
     start, end = last_week_range(now.date())
-    by_day = prime_db.profit_by_day(start.isoformat(), end.isoformat(), market)
-    total = prime_db.profit_total(start.isoformat(), end.isoformat(), market)
+    by_day = prime_db.profit_by_day_rule(rule["id"], start.isoformat(), end.isoformat())
+    total = prime_db.profit_total_rule(rule["id"], start.isoformat(), end.isoformat())
     lines = [
-        _prime_header(market),
+        _prime_rule_header(rule),
         GREETING,
         f"За прошедшую неделю прибыль составила {_pct(total):.2f}%",
     ]
@@ -149,12 +149,12 @@ def build_prime_weekly_text(now: datetime | None = None, market: str = "tm") -> 
     return "\n".join(lines)
 
 
-def build_prime_monthly_text(now: datetime | None = None, market: str = "tm") -> str:
+def build_prime_rule_monthly_text(rule: dict, now: datetime | None = None) -> str:
     now = now or datetime.now(MSK)
     start, end = last_month_range(now.date())
-    total = prime_db.profit_total(start.isoformat(), end.isoformat(), market)
+    total = prime_db.profit_total_rule(rule["id"], start.isoformat(), end.isoformat())
     return "\n".join([
-        _prime_header(market),
+        _prime_rule_header(rule),
         GREETING,
         f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
     ])

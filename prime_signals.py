@@ -1,10 +1,12 @@
 """Движок стратегии PRIME (сигналы ТМ / ИТМ1).
 
-Наборы задаются кнопками бота (prime_db): рынок (ТМ|ИТМ1) + минута + галочки пар.
+Наборы задаются кнопками бота (prime_db): рынок (ТМ|ИТМ1) + минута + СВОЙ чат
+рассылки + СВОЙ график работы по часам + СВОИ дни недели + галочки пар.
 Срабатывание: на СТРОГО заданной игровой минуте матча Prime муж, если пара матча
-отмечена в наборе — берём текущую КРАЙНЮЮ линию рынка (та же, что пишет сборщик:
-collector.extract_markets) и шлём один сигнал на матч на набор (дедуп через БД) в
-чат стратегии (config.PRIME_STRAT_CODE). Фильтра по значению линии нет.
+отмечена в наборе И сейчас попадает в график/дни набора (rule_active_now) — берём
+текущую КРАЙНЮЮ линию рынка (та же, что пишет сборщик: collector.extract_markets) и
+шлём один сигнал на матч на набор (дедуп через БД) в ЧАТ НАБОРА (prime_rules.chat_id).
+Фильтра по значению линии нет. Без чата сигнал пишется в БД, но не отправляется.
 
 На финале — дорасчёт по счёту основного времени:
   ТМ:   зашло, если (s1 + s2) < линия; пуш (Возврат), если равно;
@@ -17,13 +19,15 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 import collector
-import database
 import prime_db
+import signals
 import tg_notify
-from config import PRIME_STRAT_CHAT, PRIME_STRAT_CODE_TM, PRIME_MARKETS, STAKE
+from config import PRIME_MARKETS, STAKE
 
 log = logging.getLogger("prime_signals")
 MSK = timezone(timedelta(hours=3))
+
+WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 # Рынок -> (поле линии, поле кф) в результате collector.extract_markets.
 MARKET_FIELD = {
@@ -34,6 +38,61 @@ MARKET_FIELD = {
 
 def market_label(code: str) -> str:
     return PRIME_MARKETS.get(code, code)
+
+
+# --- график работы и дни недели набора (свои у каждого набора) --------------
+
+def _parse_windows(s: str | None) -> list[tuple]:
+    """'10:00-12:00,16:00-18:00' -> [(time,time), ...] (через signals._parse_hhmm)."""
+    out = []
+    for part in (s or "").split(","):
+        part = part.strip()
+        if "-" not in part:
+            continue
+        a, b = part.split("-", 1)
+        sa, sb = signals._parse_hhmm(a.strip()), signals._parse_hhmm(b.strip())
+        if sa and sb:
+            out.append((sa, sb))
+    return out
+
+
+def parse_weekdays(s: str | None) -> set:
+    """CSV '0,1,..6' (Пн..Вс) -> множество индексов. Пусто = пусто (= все дни)."""
+    days = set()
+    for x in (s or "").split(","):
+        x = x.strip()
+        if x.isdigit() and 0 <= int(x) <= 6:
+            days.add(int(x))
+    return days
+
+
+def rule_active_now(rule: dict) -> bool:
+    """Набор активен СЕЙЧАС (МСК): день недели в наборе (пусто/все 7 = все дни) И
+    время попадает в одно из окон работы (пусто = круглосуточно)."""
+    now = signals.msk_now()
+    days = parse_weekdays(rule.get("weekdays"))
+    if days and len(days) < 7 and now.weekday() not in days:
+        return False
+    wins = _parse_windows(rule.get("windows"))
+    if wins:
+        t = now.time()
+        if not any(signals._in_interval(t, s, e) for s, e in wins):
+            return False
+    return True
+
+
+def fmt_windows(rule: dict) -> str:
+    s = rule.get("windows")
+    if not s:
+        return "круглосуточно"
+    return ", ".join(p.strip() for p in s.split(",")) + " МСК"
+
+
+def fmt_weekdays(rule: dict) -> str:
+    days = parse_weekdays(rule.get("weekdays"))
+    if not days or len(days) == 7:
+        return "все дни"
+    return ", ".join(WEEKDAYS_RU[i] for i in sorted(days))
 
 
 def fmt_num(o) -> str:
@@ -113,6 +172,8 @@ def process_match(state: dict, api_data):
     markets = collector.extract_markets(factors) if factors else None
 
     for rule in rules:
+        if not rule_active_now(rule):
+            continue  # вне графика работы / дня недели набора — молчим
         if pair not in prime_db.get_rule_pairs(rule["id"]):
             continue
         if prime_db.signal_exists(rule["id"], eid):
@@ -131,9 +192,8 @@ def process_match(state: dict, api_data):
 
 
 def _fire(rule: dict, state: dict, line: float, odds: float):
-    # чат — свой на каждый рынок (ТМ / ИТМ1); БД одна, разделение по market
-    chat_code = PRIME_STRAT_CHAT.get(rule["market"], PRIME_STRAT_CODE_TM)
-    chat_id = database.get_chat_id(chat_code)
+    # чат — СВОЙ у каждого набора (prime_rules.chat_id); без чата сигнал пишется в БД, но не шлётся
+    chat_id = rule.get("chat_id")
     sig = {
         "rule_id": rule["id"],
         "event_id": state["event_id"],

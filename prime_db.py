@@ -5,7 +5,9 @@
 БД сигналов (ipbl.db).
 
 Таблицы:
-  prime_rules       — набор: рынок (tm|it1) + минута + вкл/выкл;
+  prime_rules       — набор: рынок (tm|it1) + минута + вкл/выкл + СВОЙ чат рассылки
+                       (chat_id) + СВОЙ график работы по часам (windows) + СВОИ дни
+                       недели (weekdays);
   prime_rule_pairs  — галочки пар набора (нормализованная пара команд);
   prime_signals     — отправленные сигналы + дорасчёт (result + won + profit).
 
@@ -57,6 +59,9 @@ def init_db():
             market     TEXT NOT NULL,               -- 'tm' | 'it1'
             minute     INTEGER NOT NULL,            -- игровая минута сигнала (строго ==)
             enabled    INTEGER NOT NULL DEFAULT 1,
+            chat_id    INTEGER,                     -- свой чат рассылки набора (NULL = не задан)
+            windows    TEXT,                        -- график работы 'HH:MM-HH:MM,...' (NULL = круглосуточно)
+            weekdays   TEXT,                        -- дни недели CSV '0..6' Пн..Вс (NULL/'' = все дни)
             created_at TEXT NOT NULL
         );
 
@@ -97,6 +102,15 @@ def init_db():
             ON prime_signals(rule_id, event_id);
         CREATE INDEX IF NOT EXISTS idx_prime_sig_event ON prime_signals(event_id);
     """)
+    # Миграция: добить колонки набора на старых БД (chat_id/windows/weekdays).
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(prime_rules)")}
+    for col, ddl in (
+        ("chat_id",  "ALTER TABLE prime_rules ADD COLUMN chat_id INTEGER"),
+        ("windows",  "ALTER TABLE prime_rules ADD COLUMN windows TEXT"),
+        ("weekdays", "ALTER TABLE prime_rules ADD COLUMN weekdays TEXT"),
+    ):
+        if col not in cols:
+            conn.execute(ddl)
     conn.commit()
     conn.close()
 
@@ -219,6 +233,39 @@ def toggle_rule(rule_id: int) -> bool:
     conn.commit()
     conn.close()
     return bool(new_state)
+
+
+# --- чат / график работы / дни недели набора -------------------------------
+
+def update_rule_chat(rule_id: int, chat_id: int | None):
+    conn = _conn()
+    conn.execute("UPDATE prime_rules SET chat_id=? WHERE id=?", (chat_id, rule_id))
+    conn.commit()
+    conn.close()
+
+
+def update_rule_windows(rule_id: int, windows: str | None):
+    """windows — нормализованная строка 'HH:MM-HH:MM,...' или None = круглосуточно."""
+    conn = _conn()
+    conn.execute("UPDATE prime_rules SET windows=? WHERE id=?", (windows, rule_id))
+    conn.commit()
+    conn.close()
+
+
+def update_rule_weekdays(rule_id: int, weekdays: str | None):
+    """weekdays — CSV индексов дней '0,1,..6' (Пн..Вс) или None/'' = все дни."""
+    conn = _conn()
+    conn.execute("UPDATE prime_rules SET weekdays=? WHERE id=?", (weekdays or None, rule_id))
+    conn.commit()
+    conn.close()
+
+
+def rules_without_chat() -> list[dict]:
+    """Наборы без заданного чата — для миграции старых чатов рынка в чат набора."""
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM prime_rules WHERE chat_id IS NULL").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # --- галочки пар набора ----------------------------------------------------
@@ -436,6 +483,73 @@ def pair_stats_from_collector(market: str, team1: str, team2: str,
     return {"count": count, "wins": wins, "profit": profit, "roi": roi}
 
 
+def rule_stats_from_collector(rule: dict) -> dict:
+    """Гипотетическая статистика набора по СБОРЩИКУ (prime_markets.db) — по условиям
+    набора (рынок + минута + отмеченные пары), а НЕ по реально отправленным сигналам.
+
+    По ВСЕМ матчам отмеченных пар на игровой минуте набора берём последний снимок
+    минуты (MAX(id)) с рассчитанным исходом рынка и считаем флэт STAKE по кф снимка:
+    Выигрыш -> +STAKE*(кф-1), Проигрыш -> -STAKE, Возврат/нерасчёт — не в прибыль.
+    Даёт бэктест набора на исторических данных сборщика (не обнуляется при смене
+    чата/условий, в отличие от rule_stats по отправленным сигналам)."""
+    empty = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+             "winrate": 0.0, "profit": 0.0, "staked": 0.0, "roi": 0.0}
+    fields = _COLLECTOR_FIELDS.get(rule["market"])
+    if fields is None:
+        return empty
+    line_f, odds_f, res_f = fields
+    sel = get_rule_pairs(rule["id"])
+    try:
+        conn = _source_conn()
+        rows = conn.execute(
+            f"SELECT team1, team2, {odds_f} AS odds, {res_f} AS res, MAX(id) "
+            "FROM market_snapshots WHERE game_minute=? GROUP BY event_id",
+            (rule["minute"],)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return empty
+    wins = losses = pushes = no_result = 0
+    profit = 0.0
+    for r in rows:
+        if norm_pair(r["team1"], r["team2"]) not in sel:
+            continue
+        if r["odds"] is None:
+            continue                       # рынок не котировался на минуте — не учитываем
+        res = r["res"]
+        if res == "Выигрыш":
+            wins += 1
+            profit += STAKE * (float(r["odds"]) - 1.0)
+        elif res == "Проигрыш":
+            losses += 1
+            profit += -STAKE
+        elif res == "Возврат":
+            pushes += 1
+        else:
+            no_result += 1
+    settled = wins + losses
+    staked = settled * STAKE
+    return {"signals": wins + losses + pushes + no_result,
+            "wins": wins, "losses": losses, "pushes": pushes, "no_result": no_result,
+            "winrate": (wins / settled * 100) if settled else 0.0,
+            "profit": profit, "staked": staked,
+            "roi": (profit / staked * 100) if staked else 0.0}
+
+
+def overall_stats_from_collector(market: str | None = None) -> dict:
+    """Сумма rule_stats_from_collector по всем наборам (опц. фильтр рынка)."""
+    tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+           "profit": 0.0, "staked": 0.0}
+    for r in get_rules(market):
+        st = rule_stats_from_collector(r)
+        for k in ("signals", "wins", "losses", "pushes", "no_result", "profit", "staked"):
+            tot[k] += st[k]
+    settled = tot["wins"] + tot["losses"]
+    tot["winrate"] = (tot["wins"] / settled * 100) if settled else 0.0
+    tot["roi"] = (tot["profit"] / tot["staked"] * 100) if tot["staked"] else 0.0
+    tot["balance"] = BANKROLL_START + tot["profit"]
+    return tot
+
+
 def overall_stats(market: str | None = None) -> dict:
     tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
            "profit": 0.0, "staked": 0.0}
@@ -476,6 +590,28 @@ def profit_total(start: str, end: str, market: str | None = None) -> float:
         q += " AND market=?"
         args.append(market)
     v = conn.execute(q, args).fetchone()[0]
+    conn.close()
+    return v
+
+
+def profit_by_day_rule(rule_id: int, start: str, end: str) -> dict[str, float]:
+    """Прибыль по дням для ОДНОГО набора (для пер-наборного отчёта)."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT date(created_at) AS d, COALESCE(SUM(profit), 0) AS p "
+        "FROM prime_signals WHERE status='sent' AND profit IS NOT NULL AND rule_id=? "
+        "AND date(created_at) BETWEEN ? AND ? GROUP BY d", (rule_id, start, end)).fetchall()
+    conn.close()
+    return {r["d"]: r["p"] for r in rows}
+
+
+def profit_total_rule(rule_id: int, start: str, end: str) -> float:
+    """Суммарная прибыль за период для ОДНОГО набора."""
+    conn = _conn()
+    v = conn.execute(
+        "SELECT COALESCE(SUM(profit), 0) FROM prime_signals "
+        "WHERE status='sent' AND profit IS NOT NULL AND rule_id=? "
+        "AND date(created_at) BETWEEN ? AND ?", (rule_id, start, end)).fetchone()[0]
     conn.close()
     return v
 
