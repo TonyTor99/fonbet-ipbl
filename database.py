@@ -9,7 +9,8 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from config import BANKROLL_START, STAKE, THRESHOLD
+from config import (BANKROLL_START, STAKE, THRESHOLD,
+                    IPBL_DIV_ORDER, ipbl_div_key)
 
 DB_PATH = os.getenv("IPBL_DB_PATH", str(Path(__file__).parent / "ipbl.db"))
 
@@ -77,6 +78,50 @@ def init_db():
             threshold  REAL,                        -- запас формулы для ЭТОЙ лиги (NULL = дефолт config.THRESHOLD)
             updated_at TEXT
         );
+
+        -- Наборы стратегии IPBL (signal_tm): у каждого свой чат + запасы по 4
+        -- дивизионам (NULL = дивизион выключен для набора) + график + дни недели.
+        CREATE TABLE IF NOT EXISTS ipbl_rules (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            chat_id     INTEGER,                     -- свой чат рассылки (NULL = не задан, не шлём)
+            zapas_pro    REAL, zapas_prow REAL,      -- запасы формулы по дивизионам (NULL = дивизион выкл)
+            zapas_prime  REAL, zapas_primew REAL,
+            windows     TEXT,                        -- 'HH:MM-HH:MM,...' (NULL = круглосуточно)
+            weekdays    TEXT,                        -- CSV '0..6' Пн..Вс (NULL/'' = все дни)
+            created_at  TEXT NOT NULL
+        );
+        -- Белый список пар набора (общий по набору; пусто = все пары).
+        CREATE TABLE IF NOT EXISTS ipbl_rule_pairs (
+            rule_id INTEGER NOT NULL,
+            team_a  TEXT NOT NULL, team_b TEXT NOT NULL,
+            PRIMARY KEY (rule_id, team_a, team_b),
+            FOREIGN KEY (rule_id) REFERENCES ipbl_rules(id) ON DELETE CASCADE
+        );
+        -- Чёрный список пар ПО ДИВИЗИОНАМ (режет поверх белого).
+        CREATE TABLE IF NOT EXISTS ipbl_rule_blacklist (
+            rule_id INTEGER NOT NULL,
+            div     TEXT NOT NULL,                   -- pro|prow|prime|primew
+            team_a  TEXT NOT NULL, team_b TEXT NOT NULL,
+            PRIMARY KEY (rule_id, div, team_a, team_b),
+            FOREIGN KEY (rule_id) REFERENCES ipbl_rules(id) ON DELETE CASCADE
+        );
+        -- Реально отправленные сигналы наборов (дедуп + отчёты). Исторические снимки
+        -- перерыва для гипотетической статистики — в основной таблице signals.
+        CREATE TABLE IF NOT EXISTS ipbl_sent (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id     INTEGER NOT NULL,
+            event_id    INTEGER NOT NULL,
+            league      TEXT, div TEXT,
+            team1       TEXT, team2 TEXT,
+            line        REAL, odds REAL, formula_value REAL,
+            score1      INTEGER, score2 INTEGER, quarters TEXT,
+            chat_id     INTEGER, message_id INTEGER, status TEXT,
+            result      TEXT, final_score TEXT, final_total INTEGER, profit REAL,
+            created_at  TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ipbl_sent_unique ON ipbl_sent(rule_id, event_id);
+        CREATE INDEX IF NOT EXISTS idx_ipbl_sent_event ON ipbl_sent(event_id);
 
         -- Стратегия шорт-хоккея: правила по лигам. Одно правило = лига + минута +
         -- исход (win1/draw/win2) + диапазон кф. Правил сколько угодно (одну лигу
@@ -542,6 +587,377 @@ def clear_db():
     conn2 = sqlite3.connect(DB_PATH)
     conn2.execute("VACUUM")
     conn2.close()
+
+
+# ===========================================================================
+# Наборы стратегии IPBL (signal_tm): чат/запасы по дивизионам/график/дни/пары/ЧС.
+# Хранилище — ipbl.db; список пар и гипотетическая статистика — из таблицы signals
+# (каждый перерыв пишется туда как снимок с line/odds/formula_value/result).
+# ===========================================================================
+
+def _ipbl_norm(t1: str, t2: str) -> tuple[str, str]:
+    """Нормализованная пара (порядок команд не важен)."""
+    a, b = (t1 or "").strip(), (t2 or "").strip()
+    return tuple(sorted((a, b), key=str.lower))
+
+
+def ipbl_pair_label(a: str, b: str) -> str:
+    return f"{a} — {b}"
+
+
+def _ipbl_zapas_col(div: str) -> str:
+    if div not in IPBL_DIV_ORDER:
+        raise ValueError(f"bad div {div}")
+    return f"zapas_{div}"
+
+
+# --- наборы ----------------------------------------------------------------
+
+def ipbl_get_rules() -> list[dict]:
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM ipbl_rules ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def ipbl_get_rule(rule_id: int) -> dict | None:
+    conn = _conn()
+    row = conn.execute("SELECT * FROM ipbl_rules WHERE id=?", (rule_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def ipbl_rules_count() -> int:
+    conn = _conn()
+    n = conn.execute("SELECT COUNT(*) FROM ipbl_rules").fetchone()[0]
+    conn.close()
+    return n
+
+
+def ipbl_add_rule(chat_id: int | None = None, zapas: dict | None = None,
+                  windows: str | None = None, weekdays: str | None = None) -> int:
+    zapas = zapas or {}
+    conn = _conn()
+    cur = conn.execute(
+        "INSERT INTO ipbl_rules (enabled, chat_id, zapas_pro, zapas_prow, zapas_prime, "
+        "zapas_primew, windows, weekdays, created_at) VALUES (1,?,?,?,?,?,?,?,?)",
+        (chat_id, zapas.get("pro"), zapas.get("prow"), zapas.get("prime"),
+         zapas.get("primew"), windows, weekdays,
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def ipbl_update_rule_chat(rule_id: int, chat_id: int | None):
+    conn = _conn()
+    conn.execute("UPDATE ipbl_rules SET chat_id=? WHERE id=?", (chat_id, rule_id))
+    conn.commit(); conn.close()
+
+
+def ipbl_update_rule_windows(rule_id: int, windows: str | None):
+    conn = _conn()
+    conn.execute("UPDATE ipbl_rules SET windows=? WHERE id=?", (windows, rule_id))
+    conn.commit(); conn.close()
+
+
+def ipbl_update_rule_weekdays(rule_id: int, weekdays: str | None):
+    conn = _conn()
+    conn.execute("UPDATE ipbl_rules SET weekdays=? WHERE id=?", (weekdays or None, rule_id))
+    conn.commit(); conn.close()
+
+
+def ipbl_set_zapas(rule_id: int, div: str, value):
+    """value = число (запас, обычно отрицательный) или None (дивизион выключить)."""
+    col = _ipbl_zapas_col(div)
+    conn = _conn()
+    conn.execute(f"UPDATE ipbl_rules SET {col}=? WHERE id=?", (value, rule_id))
+    conn.commit(); conn.close()
+
+
+def ipbl_toggle_rule(rule_id: int) -> bool:
+    conn = _conn()
+    row = conn.execute("SELECT enabled FROM ipbl_rules WHERE id=?", (rule_id,)).fetchone()
+    if row is None:
+        conn.close(); return False
+    new = 0 if row["enabled"] else 1
+    conn.execute("UPDATE ipbl_rules SET enabled=? WHERE id=?", (new, rule_id))
+    conn.commit(); conn.close()
+    return bool(new)
+
+
+def ipbl_delete_rule(rule_id: int):
+    conn = _conn()
+    conn.execute("DELETE FROM ipbl_rule_pairs WHERE rule_id=?", (rule_id,))
+    conn.execute("DELETE FROM ipbl_rule_blacklist WHERE rule_id=?", (rule_id,))
+    conn.execute("DELETE FROM ipbl_rules WHERE id=?", (rule_id,))
+    conn.commit(); conn.close()
+
+
+# --- белый список пар ------------------------------------------------------
+
+def ipbl_get_pairs(rule_id: int) -> set:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT team_a, team_b FROM ipbl_rule_pairs WHERE rule_id=?", (rule_id,)).fetchall()
+    conn.close()
+    return {(r["team_a"], r["team_b"]) for r in rows}
+
+
+def ipbl_count_pairs(rule_id: int) -> int:
+    conn = _conn()
+    n = conn.execute("SELECT COUNT(*) FROM ipbl_rule_pairs WHERE rule_id=?", (rule_id,)).fetchone()[0]
+    conn.close()
+    return n
+
+
+def ipbl_toggle_pair(rule_id: int, a: str, b: str) -> bool:
+    conn = _conn()
+    row = conn.execute("SELECT 1 FROM ipbl_rule_pairs WHERE rule_id=? AND team_a=? AND team_b=?",
+                       (rule_id, a, b)).fetchone()
+    if row:
+        conn.execute("DELETE FROM ipbl_rule_pairs WHERE rule_id=? AND team_a=? AND team_b=?",
+                     (rule_id, a, b)); new = False
+    else:
+        conn.execute("INSERT OR IGNORE INTO ipbl_rule_pairs (rule_id, team_a, team_b) VALUES (?,?,?)",
+                     (rule_id, a, b)); new = True
+    conn.commit(); conn.close()
+    return new
+
+
+def ipbl_set_pairs(rule_id: int, pairs: list, enabled: bool):
+    conn = _conn()
+    if enabled:
+        conn.executemany("INSERT OR IGNORE INTO ipbl_rule_pairs (rule_id, team_a, team_b) VALUES (?,?,?)",
+                         [(rule_id, a, b) for a, b in pairs])
+    else:
+        conn.executemany("DELETE FROM ipbl_rule_pairs WHERE rule_id=? AND team_a=? AND team_b=?",
+                         [(rule_id, a, b) for a, b in pairs])
+    conn.commit(); conn.close()
+
+
+# --- чёрный список пар по дивизиону ----------------------------------------
+
+def ipbl_get_blacklist(rule_id: int, div: str) -> set:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT team_a, team_b FROM ipbl_rule_blacklist WHERE rule_id=? AND div=?",
+        (rule_id, div)).fetchall()
+    conn.close()
+    return {(r["team_a"], r["team_b"]) for r in rows}
+
+
+def ipbl_count_blacklist(rule_id: int, div: str) -> int:
+    conn = _conn()
+    n = conn.execute("SELECT COUNT(*) FROM ipbl_rule_blacklist WHERE rule_id=? AND div=?",
+                     (rule_id, div)).fetchone()[0]
+    conn.close()
+    return n
+
+
+def ipbl_toggle_blacklist(rule_id: int, div: str, a: str, b: str) -> bool:
+    conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM ipbl_rule_blacklist WHERE rule_id=? AND div=? AND team_a=? AND team_b=?",
+        (rule_id, div, a, b)).fetchone()
+    if row:
+        conn.execute("DELETE FROM ipbl_rule_blacklist WHERE rule_id=? AND div=? AND team_a=? AND team_b=?",
+                     (rule_id, div, a, b)); new = False
+    else:
+        conn.execute("INSERT OR IGNORE INTO ipbl_rule_blacklist (rule_id, div, team_a, team_b) "
+                     "VALUES (?,?,?,?)", (rule_id, div, a, b)); new = True
+    conn.commit(); conn.close()
+    return new
+
+
+def ipbl_set_blacklist(rule_id: int, div: str, pairs: list, enabled: bool):
+    conn = _conn()
+    if enabled:
+        conn.executemany("INSERT OR IGNORE INTO ipbl_rule_blacklist (rule_id, div, team_a, team_b) "
+                         "VALUES (?,?,?,?)", [(rule_id, div, a, b) for a, b in pairs])
+    else:
+        conn.executemany("DELETE FROM ipbl_rule_blacklist WHERE rule_id=? AND div=? AND team_a=? AND team_b=?",
+                         [(rule_id, div, a, b) for a, b in pairs])
+    conn.commit(); conn.close()
+
+
+def ipbl_pair_allowed(rule_id: int, div: str, pair: tuple) -> bool:
+    """Белый список (пусто = все пары) + чёрный список дивизиона поверх (исключает)."""
+    white = ipbl_get_pairs(rule_id)
+    if white and pair not in white:
+        return False
+    if pair in ipbl_get_blacklist(rule_id, div):
+        return False
+    return True
+
+
+# --- источник пар/команд (из истории перерывов signals, strategy='signal_tm') ---
+
+def _ipbl_source_rows() -> list[dict]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT team1, team2, division, league FROM signals WHERE strategy='signal_tm' "
+        "AND team1 IS NOT NULL AND team1<>'' AND team2 IS NOT NULL AND team2<>''").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def ipbl_distinct_pairs(div: str | None = None) -> list[tuple]:
+    pairs = set()
+    for r in _ipbl_source_rows():
+        if div is not None and ipbl_div_key(r["division"], r["league"]) != div:
+            continue
+        pairs.add(_ipbl_norm(r["team1"], r["team2"]))
+    return sorted(pairs, key=lambda p: (p[0].lower(), p[1].lower()))
+
+
+def ipbl_distinct_teams(div: str | None = None) -> list[str]:
+    teams = set()
+    for r in _ipbl_source_rows():
+        if div is not None and ipbl_div_key(r["division"], r["league"]) != div:
+            continue
+        if r["team1"]:
+            teams.add(r["team1"].strip())
+        if r["team2"]:
+            teams.add(r["team2"].strip())
+    return sorted(teams, key=str.lower)
+
+
+# --- гипотетическая статистика набора по истории перерывов (signals) --------
+
+def _ipbl_empty_stats() -> dict:
+    return {"signals": 0, "wins": 0, "losses": 0, "no_result": 0,
+            "winrate": 0.0, "profit": 0.0, "staked": 0.0, "roi": 0.0}
+
+
+def ipbl_rule_stats_from_history(rule: dict) -> dict:
+    """Бэктест набора по истории перерывов (таблица signals): берём рассчитанные
+    снимки ТМ (result В/П, есть линия и кф), для каждого определяем дивизион, берём
+    запас набора по этому дивизиону (None = дивизион выключен → пропуск), проверяем
+    формулу (formula_value <= запас) и фильтр пар (белый+чёрный). Прибыль флэт STAKE."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT team1, team2, division, league, formula_value, odds, result "
+        "FROM signals WHERE strategy='signal_tm' AND result IN ('Выигрыш','Проигрыш') "
+        "AND line IS NOT NULL AND odds IS NOT NULL AND formula_value IS NOT NULL").fetchall()
+    conn.close()
+    white = ipbl_get_pairs(rule["id"])
+    blk = {d: ipbl_get_blacklist(rule["id"], d) for d in IPBL_DIV_ORDER}
+    wins = losses = 0
+    profit = 0.0
+    for r in rows:
+        div = ipbl_div_key(r["division"], r["league"])
+        zap = rule.get(f"zapas_{div}") if div in IPBL_DIV_ORDER else None
+        if zap is None:
+            continue
+        if r["formula_value"] > zap:
+            continue
+        pair = _ipbl_norm(r["team1"], r["team2"])
+        if white and pair not in white:
+            continue
+        if pair in blk.get(div, set()):
+            continue
+        if r["result"] == "Выигрыш":
+            wins += 1
+            profit += STAKE * (float(r["odds"]) - 1.0)
+        else:
+            losses += 1
+            profit += -STAKE
+    settled = wins + losses
+    staked = settled * STAKE
+    return {"signals": settled, "wins": wins, "losses": losses, "no_result": 0,
+            "winrate": (wins / settled * 100) if settled else 0.0,
+            "profit": profit, "staked": staked,
+            "roi": (profit / staked * 100) if staked else 0.0}
+
+
+def ipbl_overall_stats_from_history() -> dict:
+    tot = _ipbl_empty_stats()
+    for r in ipbl_get_rules():
+        st = ipbl_rule_stats_from_history(r)
+        for k in ("signals", "wins", "losses", "no_result", "profit", "staked"):
+            tot[k] += st[k]
+    settled = tot["wins"] + tot["losses"]
+    tot["winrate"] = (tot["wins"] / settled * 100) if settled else 0.0
+    tot["roi"] = (tot["profit"] / tot["staked"] * 100) if tot["staked"] else 0.0
+    tot["balance"] = BANKROLL_START + tot["profit"]
+    return tot
+
+
+# --- отправленные сигналы наборов (дедуп + отчёты) -------------------------
+
+def ipbl_sent_exists(rule_id: int, event_id: int) -> bool:
+    conn = _conn()
+    row = conn.execute("SELECT 1 FROM ipbl_sent WHERE rule_id=? AND event_id=?",
+                       (rule_id, event_id)).fetchone()
+    conn.close()
+    return row is not None
+
+
+def ipbl_insert_sent(sig: dict) -> int | None:
+    conn = _conn()
+    try:
+        cur = conn.execute("""
+            INSERT INTO ipbl_sent
+                (rule_id, event_id, league, div, team1, team2, line, odds, formula_value,
+                 score1, score2, quarters, chat_id, message_id, status,
+                 result, final_score, final_total, profit, created_at)
+            VALUES
+                (:rule_id, :event_id, :league, :div, :team1, :team2, :line, :odds, :formula_value,
+                 :score1, :score2, :quarters, :chat_id, :message_id, :status,
+                 :result, :final_score, :final_total, :profit, :created_at)
+        """, sig)
+        conn.commit()
+        return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+    finally:
+        conn.close()
+
+
+def ipbl_get_sent_for_event(event_id: int) -> list[dict]:
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM ipbl_sent WHERE event_id=?", (event_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def ipbl_update_sent_result(sent_id: int, result: str | None, final_score: str,
+                            final_total: int, profit: float | None):
+    conn = _conn()
+    conn.execute(
+        "UPDATE ipbl_sent SET result=?, final_score=?, final_total=?, profit=? WHERE id=?",
+        (result, final_score, final_total, profit, sent_id))
+    conn.commit(); conn.close()
+
+
+def ipbl_clear_sent(rule_id: int | None = None):
+    conn = _conn()
+    if rule_id is None:
+        conn.execute("DELETE FROM ipbl_sent")
+    else:
+        conn.execute("DELETE FROM ipbl_sent WHERE rule_id=?", (rule_id,))
+    conn.commit(); conn.close()
+
+
+def ipbl_profit_by_day_rule(rule_id: int, start: str, end: str) -> dict[str, float]:
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT date(created_at) AS d, COALESCE(SUM(profit),0) AS p FROM ipbl_sent "
+        "WHERE status='sent' AND profit IS NOT NULL AND rule_id=? "
+        "AND date(created_at) BETWEEN ? AND ? GROUP BY d", (rule_id, start, end)).fetchall()
+    conn.close()
+    return {r["d"]: r["p"] for r in rows}
+
+
+def ipbl_profit_total_rule(rule_id: int, start: str, end: str) -> float:
+    conn = _conn()
+    v = conn.execute(
+        "SELECT COALESCE(SUM(profit),0) FROM ipbl_sent WHERE status='sent' AND profit IS NOT NULL "
+        "AND rule_id=? AND date(created_at) BETWEEN ? AND ?", (rule_id, start, end)).fetchone()[0]
+    conn.close()
+    return v
 
 
 # ===========================================================================

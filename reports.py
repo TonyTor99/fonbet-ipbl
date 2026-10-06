@@ -22,7 +22,7 @@ import pq_db
 import cage_strat_db
 import prime_women_db
 import pro_strat_db
-from config import BANKROLL_START
+from config import BANKROLL_START, IPBL_DIV_LABELS, IPBL_DIV_ORDER
 
 MSK = timezone(timedelta(hours=3))
 
@@ -103,6 +103,56 @@ def build_monthly_text(now: datetime | None = None) -> str:
     total = database.profit_total(start.isoformat(), end.isoformat())
     return "\n".join([
         REPORT_HEADER,
+        GREETING,
+        f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+# ===========================================================================
+# Отчёты НАБОРОВ стратегии IPBL (пер-наборно, в чат набора; по ipbl_sent).
+# ===========================================================================
+
+def _ipbl_rule_header(rule: dict) -> str:
+    zaps = [f"{IPBL_DIV_LABELS[d]} {rule[f'zapas_{d}']:g}"
+            for d in IPBL_DIV_ORDER if rule[f"zapas_{d}"] is not None]
+    tail = "; ".join(zaps) if zaps else "дивизионы не заданы"
+    return f"Стратегия IPBL · набор #{rule['id']} ({tail})"
+
+
+def build_ipbl_rule_daily_text(rule: dict, now: datetime | None = None,
+                               day: date | None = None) -> str:
+    now = now or datetime.now(MSK)
+    day = day or (now.date() - timedelta(days=1))
+    total = database.ipbl_profit_total_rule(rule["id"], day.isoformat(), day.isoformat())
+    return "\n".join([
+        _ipbl_rule_header(rule),
+        GREETING,
+        f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+def build_ipbl_rule_weekly_text(rule: dict, now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_week_range(now.date())
+    by_day = database.ipbl_profit_by_day_rule(rule["id"], start.isoformat(), end.isoformat())
+    total = database.ipbl_profit_total_rule(rule["id"], start.isoformat(), end.isoformat())
+    lines = [
+        _ipbl_rule_header(rule),
+        GREETING,
+        f"За прошедшую неделю прибыль составила {_pct(total):.2f}%",
+    ]
+    for i in range(7):
+        d = start + timedelta(days=i)
+        lines.append(_day_line(d, by_day.get(d.isoformat(), 0.0)))
+    return "\n".join(lines)
+
+
+def build_ipbl_rule_monthly_text(rule: dict, now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_month_range(now.date())
+    total = database.ipbl_profit_total_rule(rule["id"], start.isoformat(), end.isoformat())
+    return "\n".join([
+        _ipbl_rule_header(rule),
         GREETING,
         f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
     ])

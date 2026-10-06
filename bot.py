@@ -60,7 +60,7 @@ from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     PQ_STRAT_CODE, PQ_SIDES,
                     CAGE_STRAT_CODE, CAGE_STRAT_CODE_TM, CAGE_STRAT_CHAT,
                     CAGE_STRAT_MARKETS, CAGE_STRAT_PREMATCH, PW_STRAT_CODE,
-                    PRO_STRAT_CODE)
+                    PRO_STRAT_CODE, IPBL_DIV_LABELS, IPBL_DIV_ORDER, IPBL_DIV_BY_SPORT)
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -478,12 +478,10 @@ def strategy_kb() -> InlineKeyboardMarkup:
               InlineKeyboardButton("▶️ Запустить парсер IPBL", callback_data="start"))
     return InlineKeyboardMarkup([
         [toggle],
-        [InlineKeyboardButton("🎚 Запас сигнала (по лигам)", callback_data="thr")],
-        [InlineKeyboardButton("🏀 Лиги (вкл/выкл)", callback_data="leagues")],
+        [InlineKeyboardButton("📋 Наборы IPBL (чат+запасы+график+дни+пары+ЧС)", callback_data="ibrules")],
         [InlineKeyboardButton("⚙️ Чаты стратегий", callback_data="chats")],
-        [InlineKeyboardButton("⏰ Время работы", callback_data="sched")],
-        [InlineKeyboardButton("📈 Отчёты прибыли", callback_data="reports")],
-        [InlineKeyboardButton("📥 Выгрузить сигналы (Excel)", callback_data="export_sig")],
+        [InlineKeyboardButton("⏰ Время работы (Prime-перерыв)", callback_data="sched")],
+        [InlineKeyboardButton("📥 Выгрузить снимки перерывов (Excel)", callback_data="export_sig")],
         [InlineKeyboardButton("🗑 Сбросить БД стратегий", callback_data="reset_ask")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="strats")],
     ])
@@ -593,35 +591,29 @@ def _bal_line() -> str:
 def stats_tm_text() -> str:
     """Статистика стратегии «Сигнал ТМ» (+ уведомления Prime-перерыва)."""
     lines = ["📊 <b>СТАТИСТИКА · СТРАТЕГИЯ IPBL</b>", "", _bal_line()]
-    for code, name in STRATEGIES.items():
-        s = database.bot_stats(code)
-        lines += ["", "", f"🤖 <b>{name.upper()}</b>", ""]
-        if code == "prime_info":
-            lines.append(f"🔔 Уведомлений в перерыве: {s['matches']}")
-            continue
-
-        lines.append("<b>Общая статистика</b>")
-        lines.append(f"📌 Перерывов: {s['matches']} | Сигналов: {s['signals']}")
-        lines.append(f"✅ Плюсовые: {s['wins']} | ❌ Минусовые: {s['losses']} | ⏸️ Без итога: {s['no_result']}")
-        if s["wins"] + s["losses"] > 0:
-            bal = f"{s['balance']:,.0f}".replace(",", " ")
-            lines.append(f"📈 Винрейт: {s['winrate']:.0f}%")
-            lines.append(f"🧮 ROI: {s['roi']:+.1f}%")
-            lines.append(f"💰 Прибыль: {money(s['profit'])}")
+    rules = database.ipbl_get_rules()
+    lines += ["", "", "🏀 <b>НАБОРЫ</b> (гипотетически, по истории перерывов)"]
+    if not rules:
+        lines.append("Наборов ещё нет — добавь в «📋 Наборы IPBL».")
+    else:
+        tot = database.ipbl_overall_stats_from_history()
+        lines.append(f"📌 Ставок: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']}")
+        if tot["wins"] + tot["losses"] > 0:
+            bal = f"{tot['balance']:,.0f}".replace(",", " ")
+            lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | 💰 {money(tot['profit'])}")
             lines.append(f"🏦 Баланс: {bal}₽")
+        for r in rules:
+            st = database.ipbl_rule_stats_from_history(r)
+            divs = [f"{IPBL_DIV_LABELS[d].split()[0]} {r[f'zapas_{d}']:g}"
+                    for d in IPBL_DIV_ORDER if r[f"zapas_{d}"] is not None]
+            cmark = "" if r["chat_id"] is not None else " 🔕"
+            lines += ["", f"• #{r['id']} {'/'.join(divs) if divs else 'нет див.'}{cmark}: "
+                      f"ставок {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']}"]
+            if st["wins"] + st["losses"] > 0:
+                lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
 
-        # разбивка по лигам (порядок как в LEAGUES)
-        by_lg = database.bot_stats_by_league(code)
-        for _sid, (lg_name, _div) in LEAGUES.items():
-            ls = by_lg.get(lg_name)
-            if not ls or ls["matches"] == 0:
-                continue
-            lines += ["", f"🏀 <b>{league_short(lg_name)}</b>"]
-            lines.append(f"📌 Перерывов: {ls['matches']} | Сигналов: {ls['signals']}")
-            lines.append(f"✅ {ls['wins']} | ❌ {ls['losses']} | ⏸️ {ls['no_result']}")
-            if ls["wins"] + ls["losses"] > 0:
-                lines.append(f"🎯 Винрейт: {ls['winrate']:.0f}% | ROI: {ls['roi']:+.1f}%")
-                lines.append(f"💰 Прибыль: {money(ls['profit'])}")
+    s = database.bot_stats("prime_info")
+    lines += ["", "", "🔔 <b>PRIME ПЕРЕРЫВ</b>", f"Уведомлений в перерыве: {s['matches']}"]
     return "\n".join(lines)
 
 
@@ -652,6 +644,19 @@ def _rule_strat_status(rules, chat_code: str, unit: str) -> str:
 def _prime_overview(market: str) -> str:
     """Короткий статус рынка Prime для экрана «Статус» (чат теперь у набора)."""
     rules = prime_db.get_rules(market)
+    if not rules:
+        return "⚪ нет наборов"
+    on = sum(1 for r in rules if r["enabled"])
+    no_chat = sum(1 for r in rules if r["chat_id"] is None)
+    s = f"🟢 наборов {len(rules)} (вкл {on})"
+    if no_chat:
+        s += f", 🔕 без чата {no_chat}"
+    return s
+
+
+def _ipbl_overview() -> str:
+    """Короткий статус наборов IPBL для экрана «Статус»."""
+    rules = database.ipbl_get_rules()
     if not rules:
         return "⚪ нет наборов"
     on = sum(1 for r in rules if r["enabled"])
@@ -813,6 +818,18 @@ async def _send_prime_report(bot, text: str, rule: dict):
         return False, str(e)
 
 
+async def _send_ipbl_report(bot, text: str, rule: dict):
+    """Публикует отчёт набора IPBL в ЕГО чат (rule.chat_id). (ok, err_text)."""
+    cid = rule.get("chat_id")
+    if cid is None:
+        return False, "у набора IPBL не задан чат."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 async def _send_sh_pair_report(bot, text: str):
     """Публикует отчёт стратегии ШХ · Пары в её чат. (ok, err_text)."""
     cid = database.get_chat_id(SH_PAIR_STRAT_CODE)
@@ -883,36 +900,37 @@ async def _report_scheduler(app):
     while True:
         try:
             now = datetime.now(MSK)
-            # Дневной: каждый день, начиная с 09:00 МСК (за прошедший день).
-            if now.hour >= 9:
-                marker = now.strftime("%Y-%m-%d")          # дата этого дня
-                if database.get_report_marker("daily") != marker:
-                    ok, err = await send_daily_report(app.bot)
-                    if ok:
-                        database.set_report_marker("daily", marker)
-                        print(f"[REPORT] daily sent for {marker}")
-                    else:
-                        print(f"[REPORT] daily NOT sent: {err}")
-            # Недельный: понедельник, начиная с 09:00 МСК.
-            if now.weekday() == 0 and now.hour >= 9:
-                marker = now.strftime("%Y-%m-%d")          # дата этого понедельника
-                if database.get_report_marker("weekly") != marker:
-                    ok, err = await send_weekly_report(app.bot)
-                    if ok:
-                        database.set_report_marker("weekly", marker)
-                        print(f"[REPORT] weekly sent for {marker}")
-                    else:
-                        print(f"[REPORT] weekly NOT sent: {err}")
-            # Месячный: 1-е число, начиная с 09:00 МСК.
-            if now.day == 1 and now.hour >= 9:
-                marker = now.strftime("%Y-%m")             # этот месяц
-                if database.get_report_marker("monthly") != marker:
-                    ok, err = await send_monthly_report(app.bot)
-                    if ok:
-                        database.set_report_marker("monthly", marker)
-                        print(f"[REPORT] monthly sent for {marker}")
-                    else:
-                        print(f"[REPORT] monthly NOT sent: {err}")
+            # IPBL: ПЕР-НАБОРНО (день каждый день, неделя Пн, месяц 1-е — с 09:00 МСК),
+            # каждый набор считается и уходит в СВОЙ чат, свои маркеры по id набора.
+            for r in database.ipbl_get_rules():
+                rid = r["id"]
+                if now.hour >= 9:
+                    marker = now.strftime("%Y-%m-%d")
+                    key = f"ipbl_daily_{rid}"
+                    if database.get_report_marker(key) != marker:
+                        ok, err = await _send_ipbl_report(
+                            app.bot, reports.build_ipbl_rule_daily_text(r, now), r)
+                        if ok:
+                            database.set_report_marker(key, marker)
+                            print(f"[REPORT] ipbl rule {rid} daily sent for {marker}")
+                if now.weekday() == 0 and now.hour >= 9:
+                    marker = now.strftime("%Y-%m-%d")
+                    key = f"ipbl_weekly_{rid}"
+                    if database.get_report_marker(key) != marker:
+                        ok, err = await _send_ipbl_report(
+                            app.bot, reports.build_ipbl_rule_weekly_text(r, now), r)
+                        if ok:
+                            database.set_report_marker(key, marker)
+                            print(f"[REPORT] ipbl rule {rid} weekly sent for {marker}")
+                if now.day == 1 and now.hour >= 9:
+                    marker = now.strftime("%Y-%m")
+                    key = f"ipbl_monthly_{rid}"
+                    if database.get_report_marker(key) != marker:
+                        ok, err = await _send_ipbl_report(
+                            app.bot, reports.build_ipbl_rule_monthly_text(r, now), r)
+                        if ok:
+                            database.set_report_marker(key, marker)
+                            print(f"[REPORT] ipbl rule {rid} monthly sent for {marker}")
             # Prime: дневной каждый день, недельный (Пн) и месячный (1-е) — с 09:00 МСК.
             # ПЕР-НАБОРНО: каждый набор считается и уходит в СВОЙ чат, свои маркеры.
             for r in prime_db.get_rules():
@@ -1634,6 +1652,316 @@ def shtstats_text() -> str:
         line += f" | Винрейт {tot['winrate']:.0f}% | ROI {tot['roi']:+.1f}% | {money(tot['profit'])}"
     lines += ["", line]
     return "\n".join(lines)
+
+
+# --- Наборы стратегии IPBL (чат/запасы по дивизионам/график/дни/белый+чёрный) ---
+
+IB_PAGE = 8   # пар на страницу в экранах списков
+
+
+def _ib_zap_str(z) -> str:
+    return "не задан" if z is None else f"{z:g}"
+
+
+def ibrules_kb() -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(ib_rule_label(r), callback_data=f"ibrule:{r['id']}")]
+            for r in database.ipbl_get_rules()]
+    rows.append([InlineKeyboardButton("➕ Добавить набор", callback_data="ibadd")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="strat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def ibrules_text() -> str:
+    rules = database.ipbl_get_rules()
+    lines = ["📋 <b>Наборы стратегии IPBL</b>", ""]
+    if not rules:
+        lines.append("Пока пусто. Нажми «➕ Добавить набор».")
+    else:
+        lines.append("Тап по набору — чат / запасы / график / дни / пары / ЧС / удаление.")
+    return "\n".join(lines)
+
+
+def ib_rule_label(rule: dict) -> str:
+    mark = "✅" if rule["enabled"] else "🚫"
+    divs = [d for d in IPBL_DIV_ORDER if rule[f"zapas_{d}"] is not None]
+    dpart = "/".join(IPBL_DIV_LABELS[d].split()[0] for d in divs) if divs else "нет дивизионов"
+    chat = "" if rule["chat_id"] is not None else " 🔕"
+    return f"{mark} #{rule['id']} · {dpart}{chat}"
+
+
+def ibrule_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
+    chat_lbl = (f"⚙️ Чат: {rule['chat_id']}" if rule["chat_id"] is not None else "⚙️ Чат: не задан")
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle, callback_data=f"ibtgl:{rid}")],
+        [InlineKeyboardButton(chat_lbl, callback_data=f"ibchat:{rid}")],
+        [InlineKeyboardButton("🎚 Запасы по дивизионам", callback_data=f"ibzap:{rid}")],
+        [InlineKeyboardButton(f"⏰ Время: {signals.fmt_rule_windows(rule)}", callback_data=f"ibsched:{rid}")],
+        [InlineKeyboardButton(f"📅 Дни: {signals.fmt_rule_weekdays(rule)}", callback_data=f"ibdays:{rid}")],
+        [InlineKeyboardButton(f"☑️ Белый список ({database.ipbl_count_pairs(rid) or 'все'})",
+                              callback_data=f"ibwl:{rid}")],
+        [InlineKeyboardButton("🚫 Чёрный список по дивизионам", callback_data=f"ibbl:{rid}")],
+        [InlineKeyboardButton("📈 Отчёты (день/нед/мес)", callback_data=f"ibrep:{rid}")],
+        [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"ibdel_ask:{rid}")],
+        [InlineKeyboardButton("⬅️ К наборам", callback_data="ibrules")],
+    ])
+
+
+def ibrule_text(rule: dict) -> str:
+    st = database.ipbl_rule_stats_from_history(rule)
+    chat = f"<code>{rule['chat_id']}</code>" if rule["chat_id"] is not None else "❗️ не задан"
+    zaps = [f"{IPBL_DIV_LABELS[d]} {rule[f'zapas_{d}']:g}"
+            for d in IPBL_DIV_ORDER if rule[f"zapas_{d}"] is not None]
+    zline = "; ".join(zaps) if zaps else "нет (набор молчит)"
+    wl = database.ipbl_count_pairs(rule["id"])
+    bl = sum(database.ipbl_count_blacklist(rule["id"], d) for d in IPBL_DIV_ORDER)
+    lines = [
+        f"🏀 <b>Набор IPBL #{rule['id']}</b>",
+        f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
+        "",
+        f"⚙️ Чат рассылки: {chat}",
+        f"🎚 Запасы: <b>{zline}</b>",
+        f"⏰ Время работы: <b>{signals.fmt_rule_windows(rule)}</b>",
+        f"📅 Дни недели: <b>{signals.fmt_rule_weekdays(rule)}</b>",
+        f"☑️ Белый список пар: <b>{wl if wl else 'все пары'}</b>",
+        f"🚫 Чёрный список (всего): <b>{bl}</b>",
+        "",
+        "<b>Статистика по истории перерывов</b> (гипотетически, по условиям набора)",
+        f"Ставок: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']}",
+    ]
+    if st["wins"] + st["losses"] > 0:
+        lines.append(f"Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
+        lines.append(f"Прибыль: {money(st['profit'])}")
+    return "\n".join(lines)
+
+
+def confirm_ibdel_kb(rid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Да, удалить", callback_data=f"ibdel_yes:{rid}"),
+        InlineKeyboardButton("❌ Отмена", callback_data=f"ibrule:{rid}"),
+    ]])
+
+
+def ibzap_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    rows = [[InlineKeyboardButton(f"{IPBL_DIV_LABELS[d]}: {_ib_zap_str(rule[f'zapas_{d}'])}",
+                                  callback_data=f"ibzapset:{rid}:{d}")] for d in IPBL_DIV_ORDER]
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"ibrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def ibzap_text(rule: dict) -> str:
+    return (
+        "🎚 <b>Запасы по дивизионам</b>\n"
+        "Сигнал в дивизионе, если: 2×сумма_к_перерыву − линия_ТМ ≤ запас (обычно отрицательный).\n"
+        "Пустой запас = дивизион <b>выключен</b> для набора.\n\n"
+        "Тап по дивизиону — прислать число (напр. <code>-16</code>) или <code>off</code>."
+    )
+
+
+def ibdays_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    sel = signals.parse_weekdays(rule.get("weekdays"))
+    rows, row = [], []
+    for i, name in enumerate(signals.WEEKDAYS_RU):
+        mark = "✅" if (not sel or len(sel) == 7 or i in sel) else "⬜"
+        row.append(InlineKeyboardButton(f"{mark} {name}", callback_data=f"ibday:{rid}:{i}"))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("📅 Все дни", callback_data=f"ibdayall:{rid}")])
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"ibrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def ibdays_text(rule: dict) -> str:
+    return (
+        f"📅 <b>Дни недели набора #{rule['id']}</b>\n"
+        f"Сейчас: <b>{signals.fmt_rule_weekdays(rule)}</b>\n\n"
+        "Тап по дню — вкл/выкл. Набор работает только в отмеченные дни "
+        "(все отмечены или ни одного = все дни)."
+    )
+
+
+def ibbl_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    rows = [[InlineKeyboardButton(f"🚫 {IPBL_DIV_LABELS[d]} ({database.ipbl_count_blacklist(rid, d)})",
+                                  callback_data=f"ibbldiv:{rid}:{d}")] for d in IPBL_DIV_ORDER]
+    rows.append([InlineKeyboardButton("⬅️ К набору", callback_data=f"ibrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def ibbl_text(rule: dict) -> str:
+    return (
+        "🚫 <b>Чёрный список пар по дивизионам</b>\n"
+        "Пары из ЧС дивизиона никогда не сигналят (режет поверх белого списка).\n\n"
+        "Выбери дивизион:"
+    )
+
+
+def ibrep_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 День", callback_data=f"ibrepsend:{rid}:day"),
+         InlineKeyboardButton("неделя", callback_data=f"ibrepsend:{rid}:week"),
+         InlineKeyboardButton("месяц", callback_data=f"ibrepsend:{rid}:month")],
+        [InlineKeyboardButton("⬅️ К набору", callback_data=f"ibrule:{rid}")],
+    ])
+
+
+def ibrep_text(rule: dict) -> str:
+    chat = rule["chat_id"] if rule["chat_id"] is not None else "не задан"
+    return (
+        "📈 <b>Отчёты набора IPBL</b>\n\n"
+        "Прибыль в % от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽, по реально отправленным сигналам набора.\n"
+        "Авто: день 09:00, неделя Пн, месяц 1-е (МСК) — в чат набора.\n"
+        f"Чат: {chat}\n\nКнопки — отправить сейчас."
+    )
+
+
+# --- общий экран галочек пар IPBL (белый список / ЧС по дивизиону) ----------
+
+def _ib_view(ctx, rid: int, scope: str, div):
+    v = ctx.user_data.get("ib_view")
+    if not v or v.get("rid") != rid or v.get("scope") != scope or v.get("div") != div:
+        v = {"rid": rid, "scope": scope, "div": div,
+             "filter": None, "search": "", "team": "", "page": 0}
+        ctx.user_data["ib_view"] = v
+    return v
+
+
+def _ib_source_pairs(view) -> list:
+    return database.ipbl_distinct_pairs(view["div"] if view["scope"] == "black" else None)
+
+
+def _ib_selected(view) -> set:
+    if view["scope"] == "black":
+        return database.ipbl_get_blacklist(view["rid"], view["div"])
+    return database.ipbl_get_pairs(view["rid"])
+
+
+def _ib_filtered_pairs(view) -> list:
+    pairs = _ib_source_pairs(view)
+    f = view.get("filter")
+    if f == "team":
+        t = view["team"].lower()
+        pairs = [p for p in pairs if p[0].lower() == t or p[1].lower() == t]
+    elif f == "search":
+        s = view["search"].lower()
+        pairs = [p for p in pairs if s in p[0].lower() or s in p[1].lower()]
+    elif f == "selected":
+        sel = _ib_selected(view)
+        pairs = [p for p in pairs if p in sel]
+    return pairs
+
+
+def _ib_filter_name(view) -> str:
+    f = view.get("filter")
+    if f == "team":
+        return f"команда «{view['team']}»"
+    if f == "search":
+        return f"поиск «{view['search']}»"
+    if f == "selected":
+        return "только отмеченные"
+    return "все пары"
+
+
+def _ib_toggle(view, a, b):
+    if view["scope"] == "black":
+        database.ipbl_toggle_blacklist(view["rid"], view["div"], a, b)
+    else:
+        database.ipbl_toggle_pair(view["rid"], a, b)
+
+
+def _ib_set(view, pairs, enabled):
+    if view["scope"] == "black":
+        database.ipbl_set_blacklist(view["rid"], view["div"], pairs, enabled)
+    else:
+        database.ipbl_set_pairs(view["rid"], pairs, enabled)
+
+
+def _ib_scope_title(view) -> str:
+    if view["scope"] == "black":
+        return f"🚫 ЧС · {IPBL_DIV_LABELS.get(view['div'], view['div'])}"
+    return "☑️ Белый список"
+
+
+def _ib_back_cb(view) -> str:
+    return f"ibbl:{view['rid']}" if view["scope"] == "black" else f"ibrule:{view['rid']}"
+
+
+def ibpairs_text(ctx) -> str:
+    view = ctx.user_data.get("ib_view")
+    if not view:
+        return "Нет данных — вернись в набор."
+    pairs = _ib_filtered_pairs(view)
+    sel = _ib_selected(view)
+    total = len(_ib_source_pairs(view))
+    lines = [
+        f"{_ib_scope_title(view)} · набор #{view['rid']}",
+        f"Отмечено: <b>{len(sel)}</b> из {total} пар",
+        f"Фильтр: {_ib_filter_name(view)} — найдено {len(pairs)}",
+        "",
+        "Тап по паре — поставить/снять.",
+    ]
+    if view["scope"] == "white":
+        lines.append("Пусто = сигналим по ВСЕМ парам (чёрный список режет поверх).")
+    if not pairs:
+        lines.append("\nПод фильтр ничего не попало (история перерывов этого дивизиона пуста).")
+    return "\n".join(lines)
+
+
+def ibpairs_kb(ctx) -> InlineKeyboardMarkup:
+    view = ctx.user_data.get("ib_view")
+    pairs = _ib_filtered_pairs(view)
+    sel = _ib_selected(view)
+    pages = max(1, (len(pairs) + IB_PAGE - 1) // IB_PAGE)
+    page = max(0, min(view["page"], pages - 1))
+    view["page"] = page
+    start = page * IB_PAGE
+    chunk = pairs[start:start + IB_PAGE]
+    rows = []
+    for pos, (a, b) in enumerate(chunk, start=start):
+        mark = "✅" if (a, b) in sel else "⬜"
+        rows.append([InlineKeyboardButton(f"{mark} {database.ipbl_pair_label(a, b)}",
+                                          callback_data=f"ibtog:{pos}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️", callback_data="ibpg:prev"))
+    nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="ibnop"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("▶️", callback_data="ibpg:next"))
+    if len(nav) > 1:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton("🔤 По команде", callback_data="ibflt_team"),
+        InlineKeyboardButton("🔍 Поиск", callback_data="ibflt_search"),
+    ])
+    sel_btn = ("❌ Снять фильтр" if view["filter"] else "☑️ Только отмеченные")
+    sel_cb = ("ibflt_none" if view["filter"] else "ibflt_sel")
+    rows.append([InlineKeyboardButton(sel_btn, callback_data=sel_cb)])
+    rows.append([
+        InlineKeyboardButton("✔️ Отметить (фильтр)", callback_data="iball_on"),
+        InlineKeyboardButton("✖️ Снять (фильтр)", callback_data="iball_off"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data=_ib_back_cb(view))])
+    return InlineKeyboardMarkup(rows)
+
+
+def ibteams_kb(view) -> InlineKeyboardMarkup:
+    teams = database.ipbl_distinct_teams(view["div"] if view["scope"] == "black" else None)
+    rows, row = [], []
+    for i, t in enumerate(teams):
+        row.append(InlineKeyboardButton(t, callback_data=f"ibteam:{i}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ К парам", callback_data="ibpairs_back")])
+    return InlineKeyboardMarkup(rows)
 
 
 # --- Prime-стратегия -------------------------------------------------------
@@ -3544,7 +3872,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  f"Активных сигналов (ждут итога): {active}",
                  "",
                  "<b>Стратегии</b>",
-                 f"• 🏀 Стратегия IPBL: {signals.window_status('signal_tm')}",
+                 f"• 🏀 Стратегия IPBL: {_ipbl_overview()}",
                  f"• 🏀 Prime ТМ: {_prime_overview('tm')}",
                  f"• 🏀 Prime ИТМ1: {_prime_overview('it1')}",
                  f"• 🏒 Стратегия хоккея: "
@@ -3575,6 +3903,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("cs_view", None)
         ctx.user_data.pop("pw_view", None)
         ctx.user_data.pop("pro_view", None)
+        ctx.user_data.pop("ib_view", None)
         await q.edit_message_text(strats_text(), parse_mode="HTML", reply_markup=strats_kb())
 
     elif data == "stats":
@@ -4296,6 +4625,304 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                   parse_mode="HTML", reply_markup=shtstrat_kb())
 
     # --- Prime-стратегия ---------------------------------------------------
+    # --- наборы IPBL -------------------------------------------------------
+    elif data == "ibrules":
+        ctx.user_data.pop("await", None)
+        ctx.user_data.pop("ib_view", None)
+        await q.edit_message_text(ibrules_text(), parse_mode="HTML", reply_markup=ibrules_kb())
+
+    elif data == "ibadd":
+        ctx.user_data.pop("await", None)
+        rid = database.ipbl_add_rule()
+        rule = database.ipbl_get_rule(rid)
+        await q.edit_message_text(
+            "✅ Набор создан. Задай ⚙️ чат, 🎚 запасы по дивизионам (пустой = дивизион "
+            "выкл), при желании график/дни/пары/ЧС.\n\n" + ibrule_text(rule),
+            parse_mode="HTML", reply_markup=ibrule_kb(rule))
+
+    elif data.startswith("ibrule:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            await q.edit_message_text(ibrules_text(), parse_mode="HTML", reply_markup=ibrules_kb())
+            return
+        ctx.user_data.pop("await", None)
+        await q.edit_message_text(ibrule_text(rule), parse_mode="HTML", reply_markup=ibrule_kb(rule))
+
+    elif data.startswith("ibtgl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        database.ipbl_toggle_rule(rid)
+        rule = database.ipbl_get_rule(rid)
+        if rule:
+            await q.edit_message_text(ibrule_text(rule), parse_mode="HTML", reply_markup=ibrule_kb(rule))
+
+    elif data.startswith("ibdel_ask:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not database.ipbl_get_rule(rid):
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Удалить набор #{rid}?</b>\nЗапасы, пары и чёрные списки набора "
+            "удалятся. Отменить нельзя.",
+            parse_mode="HTML", reply_markup=confirm_ibdel_kb(rid))
+
+    elif data.startswith("ibdel_yes:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        database.ipbl_delete_rule(rid)
+        await q.edit_message_text("✅ Набор удалён.\n\n" + ibrules_text(),
+                                  parse_mode="HTML", reply_markup=ibrules_kb())
+
+    elif data.startswith("ibchat:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("ib_rule_chat", rid)
+        cur = rule["chat_id"] if rule["chat_id"] is not None else "не задан"
+        await q.edit_message_text(
+            f"⚙️ <b>Чат набора #{rid}</b>\nСейчас: {cur}\n\n"
+            "Пришли <b>chat_id</b>, например <code>-1001234567890</code>.\n"
+            "Чтобы убрать — <code>off</code>.\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("ibsched:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("ib_rule_sched", rid)
+        await q.edit_message_text(
+            f"⏰ <b>Время работы набора #{rid}</b> (МСК)\n"
+            f"Сейчас: <b>{signals.fmt_rule_windows(rule)}</b>\n\n"
+            "Пришли окна через запятую: <code>10:00-12:00, 16:00-18:00</code>\n"
+            "или <code>off</code> — круглосуточно.\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("ibdays:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(ibdays_text(rule), parse_mode="HTML", reply_markup=ibdays_kb(rule))
+
+    elif data.startswith("ibday:"):
+        try:
+            _, srid, sidx = data.split(":", 2)
+            rid, idx = int(srid), int(sidx)
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule or not (0 <= idx <= 6):
+            return
+        sel = signals.parse_weekdays(rule.get("weekdays"))
+        if not sel:
+            sel = set(range(7))
+        sel ^= {idx}
+        new = None if (not sel or len(sel) == 7) else ",".join(str(i) for i in sorted(sel))
+        database.ipbl_update_rule_weekdays(rid, new)
+        rule = database.ipbl_get_rule(rid)
+        await q.edit_message_text(ibdays_text(rule), parse_mode="HTML", reply_markup=ibdays_kb(rule))
+
+    elif data.startswith("ibdayall:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not database.ipbl_get_rule(rid):
+            return
+        database.ipbl_update_rule_weekdays(rid, None)
+        rule = database.ipbl_get_rule(rid)
+        await q.edit_message_text(ibdays_text(rule), parse_mode="HTML", reply_markup=ibdays_kb(rule))
+
+    elif data.startswith("ibzap:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(ibzap_text(rule), parse_mode="HTML", reply_markup=ibzap_kb(rule))
+
+    elif data.startswith("ibzapset:"):
+        try:
+            _, srid, div = data.split(":", 2)
+            rid = int(srid)
+        except ValueError:
+            return
+        if div not in IPBL_DIV_ORDER or not database.ipbl_get_rule(rid):
+            return
+        ctx.user_data["await"] = ("ib_rule_zap", (rid, div))
+        await q.edit_message_text(
+            f"🎚 <b>Запас · {IPBL_DIV_LABELS[div]} · набор #{rid}</b>\n\n"
+            "Пришли число, например <code>-16</code> (сигнал при 2×сумма−линия ≤ запас).\n"
+            "Чтобы ВЫКЛЮЧИТЬ дивизион для набора — <code>off</code>.\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data.startswith("ibwl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not database.ipbl_get_rule(rid):
+            return
+        ctx.user_data.pop("await", None)
+        _ib_view(ctx, rid, "white", None)
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data.startswith("ibbl:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(ibbl_text(rule), parse_mode="HTML", reply_markup=ibbl_kb(rule))
+
+    elif data.startswith("ibbldiv:"):
+        try:
+            _, srid, div = data.split(":", 2)
+            rid = int(srid)
+        except ValueError:
+            return
+        if div not in IPBL_DIV_ORDER or not database.ipbl_get_rule(rid):
+            return
+        ctx.user_data.pop("await", None)
+        _ib_view(ctx, rid, "black", div)
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data.startswith("ibtog:"):
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        try:
+            pos = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        pairs = _ib_filtered_pairs(view)
+        if not (0 <= pos < len(pairs)):
+            return
+        a, b = pairs[pos]
+        _ib_toggle(view, a, b)
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data in ("ibpg:prev", "ibpg:next"):
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        view["page"] += (-1 if data.endswith("prev") else 1)
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data == "ibnop":
+        pass
+
+    elif data == "ibflt_none":
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        view.update(filter=None, search="", team="", page=0)
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data == "ibflt_sel":
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        view.update(filter="selected", page=0)
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data == "ibflt_search":
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        ctx.user_data["await"] = ("ib_search", view["rid"])
+        await q.edit_message_text(
+            "🔍 <b>Поиск пары</b>\nПришли часть названия команды.\nОтмена — /start",
+            parse_mode="HTML")
+
+    elif data == "ibflt_team":
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        await q.edit_message_text("🔤 <b>Фильтр по команде</b>\nВыбери команду:",
+                                  parse_mode="HTML", reply_markup=ibteams_kb(view))
+
+    elif data.startswith("ibteam:"):
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        try:
+            idx = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        teams = database.ipbl_distinct_teams(view["div"] if view["scope"] == "black" else None)
+        if not (0 <= idx < len(teams)):
+            return
+        view.update(filter="team", team=teams[idx], page=0)
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data == "ibpairs_back":
+        if not ctx.user_data.get("ib_view"):
+            return
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data in ("iball_on", "iball_off"):
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            return
+        _ib_set(view, _ib_filtered_pairs(view), enabled=(data == "iball_on"))
+        await q.edit_message_text(ibpairs_text(ctx), parse_mode="HTML", reply_markup=ibpairs_kb(ctx))
+
+    elif data.startswith("ibrep:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(ibrep_text(rule), parse_mode="HTML", reply_markup=ibrep_kb(rule))
+
+    elif data.startswith("ibrepsend:"):
+        try:
+            _, srid, period = data.split(":", 2)
+            rid = int(srid)
+        except ValueError:
+            return
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            return
+        if period == "day":
+            text, title = reports.build_ipbl_rule_daily_text(rule), "Дневной"
+        elif period == "week":
+            text, title = reports.build_ipbl_rule_weekly_text(rule), "Недельный"
+        else:
+            text, title = reports.build_ipbl_rule_monthly_text(rule), "Месячный"
+        ok, err = await _send_ipbl_report(ctx.bot, text, rule)
+        if ok:
+            head = f"✅ {title} отчёт набора #{rid} отправлен. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=ibrep_kb(rule))
+
     elif data == "pmstrat":
         ctx.user_data.pop("await", None)
         ctx.user_data.pop("pm_view", None)
@@ -6170,6 +6797,86 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("✅ Готово.", reply_markup=shtrules_kb())
 
+    # --- наборы IPBL ---
+    elif kind == "ib_rule_chat":
+        rid = code
+        rule = database.ipbl_get_rule(rid)
+        if not rule:
+            ctx.user_data.pop("await", None)
+            return
+        if raw.strip().lower() in ("off", "-", "убрать", "нет"):
+            database.ipbl_update_rule_chat(rid, None)
+            ctx.user_data.pop("await", None)
+            rule = database.ipbl_get_rule(rid)
+            await update.message.reply_text(
+                "✅ Чат набора убран (набор не шлёт).\n\n" + ibrule_text(rule),
+                parse_mode="HTML", reply_markup=ibrule_kb(rule))
+            return
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id — число (или <code>off</code>). "
+                                            "Ещё раз или /start.", parse_mode="HTML")
+            return
+        database.ipbl_update_rule_chat(rid, cid)
+        ctx.user_data.pop("await", None)
+        rule = database.ipbl_get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Чат набора → <code>{cid}</code>.\n\n" + ibrule_text(rule),
+            parse_mode="HTML", reply_markup=ibrule_kb(rule))
+
+    elif kind == "ib_rule_sched":
+        rid = code
+        if not database.ipbl_get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        value, ok = parse_windows_input(raw)
+        if not ok:
+            await update.message.reply_text(
+                "❌ Формат: <code>10:00-12:00, 16:00-18:00</code> или <code>off</code>.",
+                parse_mode="HTML")
+            return
+        database.ipbl_update_rule_windows(rid, value)
+        ctx.user_data.pop("await", None)
+        rule = database.ipbl_get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Время работы набора → {signals.fmt_rule_windows(rule)}.\n\n" + ibrule_text(rule),
+            parse_mode="HTML", reply_markup=ibrule_kb(rule))
+
+    elif kind == "ib_rule_zap":
+        rid, div = code
+        if not database.ipbl_get_rule(rid) or div not in IPBL_DIV_ORDER:
+            ctx.user_data.pop("await", None)
+            return
+        if raw.strip().lower() in ("off", "-", "выкл", "нет"):
+            database.ipbl_set_zapas(rid, div, None)
+            vtxt = "выключен"
+        else:
+            try:
+                v = float(raw.replace(",", "."))
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Запас — число (напр. <code>-16</code>) или <code>off</code>. Ещё раз или /start.",
+                    parse_mode="HTML")
+                return
+            database.ipbl_set_zapas(rid, div, v)
+            vtxt = f"{v:g}"
+        ctx.user_data.pop("await", None)
+        rule = database.ipbl_get_rule(rid)
+        await update.message.reply_text(
+            f"✅ {IPBL_DIV_LABELS[div]} → запас {vtxt}.",
+            parse_mode="HTML", reply_markup=ibzap_kb(rule))
+
+    elif kind == "ib_search":
+        view = ctx.user_data.get("ib_view")
+        if not view:
+            ctx.user_data.pop("await", None)
+            return
+        view.update(filter="search", search=raw, page=0)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(ibpairs_text(ctx), parse_mode="HTML",
+                                        reply_markup=ibpairs_kb(ctx))
+
     elif kind == "pm_rule_chat":
         rid = code                                   # code здесь = id набора
         rule = prime_db.get_rule(rid)
@@ -6609,6 +7316,20 @@ def main():
     cage_strat_db.init_db()
     prime_women_db.init_db()
     pro_strat_db.init_db()
+    # Миграция ОДНОКРАТНО: стратегия IPBL переехала на НАБОРЫ. Если наборов ещё нет —
+    # создаём один стартовый из текущих настроек: чат signal_tm, запасы по дивизионам
+    # из league_config (get_league_threshold), окна работы signal_tm. Белый список
+    # пуст = все пары (как было). Маркер защищает от пересоздания после удаления.
+    if database.get_report_marker("ipbl_starter_rule_migrated") != "1":
+        if database.ipbl_rules_count() == 0:
+            _zap = {div: database.get_league_threshold(sid)
+                    for sid, div in IPBL_DIV_BY_SPORT.items()}
+            _wins = database.get_windows("signal_tm")
+            _wstr = ",".join(f"{s}-{e}" for s, e in _wins) if _wins else None
+            _chat = database.get_chat_id("signal_tm")
+            _rid = database.ipbl_add_rule(chat_id=_chat, zapas=_zap, windows=_wstr)
+            print(f"[MIGRATE] ipbl starter rule #{_rid} chat={_chat} zapas={_zap} windows={_wstr}")
+        database.set_report_marker("ipbl_starter_rule_migrated", "1")
     # Миграция: старый единый чат Prime (prime_strat) переносим в чат ТМ, если тот
     # ещё не задан. Чтобы после раздельных чатов не потерять текущую настройку.
     _old_prime_chat = database.get_chat_id(PRIME_STRAT_CODE)

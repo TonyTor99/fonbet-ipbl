@@ -14,11 +14,13 @@ from datetime import datetime, time as dtime, timezone, timedelta
 
 import database
 import tg_notify
-from config import (STRATEGIES, KF_MIN, KF_MAX, STAKE)
+from config import (STRATEGIES, KF_MIN, KF_MAX, STAKE, IPBL_DIV_BY_SPORT)
 
 log = logging.getLogger("signals")
 
 MSK = timezone(timedelta(hours=3))   # расписание стратегий — по Москве (UTC+3)
+
+WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 
 def msk_now() -> datetime:
@@ -84,6 +86,60 @@ def window_status(strategy: str) -> str:
     future = sorted(s for s, _ in wins if _parse_hhmm(s) and _parse_hhmm(s) > now)
     nxt = future[0] if future else sorted(s for s, _ in wins)[0]
     return f"⏸ пауза (след. {nxt})"
+
+
+# --- расписание/дни недели НАБОРА IPBL (свои у каждого набора) --------------
+
+def _parse_windows_str(s: str | None) -> list[tuple]:
+    out = []
+    for part in (s or "").split(","):
+        part = part.strip()
+        if "-" not in part:
+            continue
+        a, b = part.split("-", 1)
+        sa, sb = _parse_hhmm(a.strip()), _parse_hhmm(b.strip())
+        if sa and sb:
+            out.append((sa, sb))
+    return out
+
+
+def parse_weekdays(s: str | None) -> set:
+    """CSV '0,1,..6' (Пн..Вс) -> множество индексов."""
+    days = set()
+    for x in (s or "").split(","):
+        x = x.strip()
+        if x.isdigit() and 0 <= int(x) <= 6:
+            days.add(int(x))
+    return days
+
+
+def ipbl_rule_active_now(rule: dict) -> bool:
+    """Набор активен СЕЙЧАС (МСК): день недели в наборе (пусто/все 7 = все дни) И
+    время в одном из окон работы (пусто = круглосуточно)."""
+    now = msk_now()
+    days = parse_weekdays(rule.get("weekdays"))
+    if days and len(days) < 7 and now.weekday() not in days:
+        return False
+    wins = _parse_windows_str(rule.get("windows"))
+    if wins:
+        t = now.time()
+        if not any(_in_interval(t, s, e) for s, e in wins):
+            return False
+    return True
+
+
+def fmt_rule_windows(rule: dict) -> str:
+    s = rule.get("windows")
+    if not s:
+        return "круглосуточно"
+    return ", ".join(p.strip() for p in s.split(",")) + " МСК"
+
+
+def fmt_rule_weekdays(rule: dict) -> str:
+    days = parse_weekdays(rule.get("weekdays"))
+    if not days or len(days) == 7:
+        return "все дни"
+    return ", ".join(WEEKDAYS_RU[i] for i in sorted(days))
 
 
 # --- выбор линии -----------------------------------------------------------
@@ -309,10 +365,11 @@ def _store_and_send(sig: dict, render_fn, muted: bool = False):
 
 # --- стратегии -------------------------------------------------------------
 
-def _process_signal_tm(st: dict, state: dict, muted: bool = False):
-    """На перерыве пишем строку для КАЖДОГО матча (с тоталами), независимо от условия.
-    В Telegram уходит только прошедший формулу (qualified) и только в окне работы.
-    muted=True (лига выключена) — строку пишем как обычно, но в TG не шлём."""
+def _process_signal_tm(st: dict, state: dict):
+    """СНИМОК перерыва: на большом перерыве пишем строку для КАЖДОГО матча (с линией
+    ТМ, кф и формулой) в таблицу signals — это историческая база («сборщик») для
+    гипотетической статистики наборов. В Telegram отсюда НЕ шлём: рассылка — через
+    наборы (_process_ipbl_rules). Один снимок на матч (дедуп по strategy+event_id)."""
     if st["tm_done"] or database.signal_exists("signal_tm", state["event_id"]):
         st["tm_done"] = True
         return
@@ -324,31 +381,22 @@ def _process_signal_tm(st: dict, state: dict, muted: bool = False):
     line = chosen["line"] if chosen else None
     odds = chosen["odds"] if chosen else None
     formula = (2 * state["half_total"] - line) if line is not None else None
-    threshold = database.get_league_threshold(state.get("sport_id"))   # запас на каждую лигу (кнопки бота)
-    qualified = 1 if (formula is not None and formula <= threshold) else 0
-    active = in_schedule("signal_tm")   # стратегия в окне работы?
 
     sig = _base_sig("signal_tm", st, state)
     sig["line"] = line
     sig["odds"] = odds
     sig["formula_value"] = formula
     sig["line_move"] = fmt_line_move(st["line_hist"], line)
-    sig["qualified"] = qualified
-    sig["in_window"] = 1 if active else 0   # пауза → в статистику не идёт
-    sig["muted"] = 1 if muted else 0        # лига выключена → пишем, но не шлём и не в статистику
-
-    # отправляем в TG только прошедший формулу, в окне работы, при включённой лиге
-    if qualified and active:
-        _store_and_send(sig, render_signal, muted)
-    else:
-        sig["status"] = "skipped"   # снимок перерыва без отправки (анализ)
-        database.insert_signal(sig)
-        log.info("snapshot signal_tm ev=%s line=%s formula=%s qualified=%s in_window=%s muted=%s",
-                 state["event_id"], line, formula, qualified, sig["in_window"], sig["muted"])
+    sig["qualified"] = 0
+    sig["in_window"] = 1
+    sig["muted"] = 0
+    sig["status"] = "snapshot"
+    database.insert_signal(sig)
+    log.info("snapshot signal_tm ev=%s line=%s formula=%s", state["event_id"], line, formula)
     st["tm_done"] = True
 
 
-def _process_prime_info(st: dict, state: dict, muted: bool = False):
+def _process_prime_info(st: dict, state: dict):
     # только МУЖСКАЯ Prime (женская — в названии "Женщины" — не нужна)
     if state["division"] != "prime" or "Женщин" in state["league"]:
         return
@@ -366,9 +414,75 @@ def _process_prime_info(st: dict, state: dict, muted: bool = False):
         sig["formula_value"] = 2 * state["half_total"] - line
     # движение линии ставки за матч
     sig["line_move"] = fmt_line_move(st["line_hist"], line)
-    sig["muted"] = 1 if muted else 0
-    _store_and_send(sig, render_info, muted)
+    sig["muted"] = 0
+    _store_and_send(sig, render_info)
     st["info_done"] = True
+
+
+# --- наборы IPBL (сигнал ТМ по условиям набора в свой чат) ------------------
+
+def render_ipbl_rule_signal(s: dict) -> str:
+    """Текст сигнала набора — тот же формат «ТМ СИГНАЛ», что и у старой стратегии."""
+    d = {
+        "league": s["league"], "team1": s["team1"], "team2": s["team2"],
+        "fixed_score1": s["score1"], "fixed_score2": s["score2"],
+        "fixed_quarters": s.get("quarters"), "line": s["line"], "odds": s["odds"],
+        "final_score": s.get("final_score"), "final_total": s.get("final_total"),
+        "result": s.get("result"), "profit": s.get("profit"),
+    }
+    return render_signal(d)
+
+
+def _process_ipbl_rules(st: dict, state: dict, line, odds, formula):
+    """На перерыве: по каждому включённому набору с заданным чатом — если дивизион
+    матча включён (запас задан), формула проходит запас набора этого дивизиона, пара
+    проходит белый+чёрный список и сейчас график/дни набора — шлём сигнал ТМ в чат
+    набора. Дедуп по (набор, матч)."""
+    if line is None or formula is None:
+        return
+    eid = state["event_id"]
+    div = IPBL_DIV_BY_SPORT.get(state.get("sport_id"))
+    if div is None:
+        return
+    pair = database._ipbl_norm(state["team1"], state["team2"])
+    for rule in database.ipbl_get_rules():
+        if not rule["enabled"] or rule["chat_id"] is None:
+            continue
+        zap = rule.get(f"zapas_{div}")
+        if zap is None or formula > zap:
+            continue                               # дивизион выключен / формула не прошла
+        if not database.ipbl_pair_allowed(rule["id"], div, pair):
+            continue
+        if not ipbl_rule_active_now(rule):
+            continue                               # вне графика/дней набора
+        if database.ipbl_sent_exists(rule["id"], eid):
+            continue
+        try:
+            _fire_ipbl_rule(rule, state, div, line, odds, formula)
+        except Exception as e:
+            log.warning("ipbl rule fire err rule=%s ev=%s: %s", rule["id"], eid, e)
+
+
+def _fire_ipbl_rule(rule: dict, state: dict, div: str, line, odds, formula):
+    chat_id = rule["chat_id"]
+    sig = {
+        "rule_id": rule["id"], "event_id": state["event_id"],
+        "league": state["league"], "div": div,
+        "team1": state["team1"], "team2": state["team2"],
+        "line": line, "odds": odds, "formula_value": formula,
+        "score1": state["score1"], "score2": state["score2"],
+        "quarters": fmt_quarters(state["quarters"]),
+        "chat_id": chat_id, "message_id": None, "status": "sent",
+        "result": None, "final_score": None, "final_total": None, "profit": None,
+        "created_at": msk_now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    sig["message_id"] = tg_notify.send(chat_id, render_ipbl_rule_signal(sig))
+    sid = database.ipbl_insert_sent(sig)
+    if sid is None:
+        log.info("ipbl dup skipped rule=%s ev=%s", rule["id"], state["event_id"])
+    else:
+        log.info("IPBL rule=%s ev=%s div=%s line=%s odds=%s formula=%s chat=%s",
+                 rule["id"], state["event_id"], div, line, odds, formula, chat_id)
 
 
 # --- точки входа -----------------------------------------------------------
@@ -391,16 +505,21 @@ def process_match(state: dict):
     if not state.get("at_break"):
         return
 
-    # лига выключена кнопкой бота — строку в БД пишем как обычно (для истории и
-    # дорасчёта прибыли), но сигнал в Telegram не шлём и в статистику не берём.
-    muted = not database.league_enabled(state.get("sport_id"))
+    # линия/кф/формула на перерыве — считаем один раз для снимка и наборов
+    line = chosen["line"] if chosen else None
+    odds = chosen["odds"] if chosen else None
+    formula = (2 * state["half_total"] - line) if line is not None else None
 
     try:
-        _process_signal_tm(st, state, muted)
+        _process_signal_tm(st, state)        # снимок в историю (signals) — без отправки
     except Exception as e:
-        log.warning("signal_tm err ev=%s: %s", eid, e)
+        log.warning("signal_tm snapshot err ev=%s: %s", eid, e)
     try:
-        _process_prime_info(st, state, muted)
+        _process_ipbl_rules(st, state, line, odds, formula)   # рассылка по наборам
+    except Exception as e:
+        log.warning("ipbl rules err ev=%s: %s", eid, e)
+    try:
+        _process_prime_info(st, state)
     except Exception as e:
         log.warning("prime_info err ev=%s: %s", eid, e)
 
@@ -431,5 +550,21 @@ def resolve(event_id: int, final_score: str, final_total: int, quarters: list | 
                 tg_notify.edit(sig["chat_id"], sig["message_id"], render_signal(s2))
     except Exception as e:
         log.warning("resolve err ev=%s: %s", event_id, e)
+
+    # дорасчёт отправленных сигналов НАБОРОВ IPBL + правка их сообщений
+    try:
+        for s in database.ipbl_get_sent_for_event(event_id):
+            if s["result"] is not None or s["line"] is None:
+                continue
+            won = final_total < s["line"]
+            result = "Выигрыш" if won else "Проигрыш"
+            profit = (STAKE * (float(s["odds"]) - 1) if won else -STAKE) if s["odds"] is not None else None
+            database.ipbl_update_sent_result(s["id"], result, final_score, final_total, profit)
+            if s["status"] == "sent" and s["message_id"] and s["chat_id"] is not None:
+                d = dict(s)
+                d.update(result=result, final_score=final_score, final_total=final_total, profit=profit)
+                tg_notify.edit(s["chat_id"], s["message_id"], render_ipbl_rule_signal(d))
+    except Exception as e:
+        log.warning("ipbl resolve err ev=%s: %s", event_id, e)
     finally:
         _state.pop(event_id, None)
