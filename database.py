@@ -926,6 +926,45 @@ def ipbl_overall_stats_from_history() -> dict:
     return tot
 
 
+# --- реальная статистика набора по ОТПРАВЛЕННЫМ сигналам (ipbl_sent) --------
+
+def ipbl_rule_stats(rule_id: int) -> dict:
+    """Статистика набора по реально отправленным сигналам (таблица ipbl_sent,
+    status='sent'). В отличие от ipbl_rule_stats_from_history (гипотетика по всем
+    перерывам из signals) — только то, что реально ушло в Telegram."""
+    conn = _conn()
+    base = "FROM ipbl_sent WHERE rule_id=? AND status='sent'"
+    total  = conn.execute(f"SELECT COUNT(*) {base}", (rule_id,)).fetchone()[0]
+    wins   = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", (rule_id,)).fetchone()[0]
+    losses = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", (rule_id,)).fetchone()[0]
+    pushes = conn.execute(f"SELECT COUNT(*) {base} AND result='Возврат'", (rule_id,)).fetchone()[0]
+    no_res = conn.execute(f"SELECT COUNT(*) {base} AND result IS NULL", (rule_id,)).fetchone()[0]
+    profit = conn.execute(f"SELECT COALESCE(SUM(profit), 0) {base}", (rule_id,)).fetchone()[0]
+    conn.close()
+    settled = wins + losses
+    staked = settled * STAKE
+    return {"signals": total, "wins": wins, "losses": losses, "pushes": pushes,
+            "no_result": no_res,
+            "winrate": (wins / settled * 100) if settled else 0.0,
+            "profit": profit, "staked": staked,
+            "roi": (profit / staked * 100) if staked else 0.0}
+
+
+def ipbl_overall_stats() -> dict:
+    """Сумма ipbl_rule_stats по всем наборам — реальная статистика по отправленным."""
+    tot = {"signals": 0, "wins": 0, "losses": 0, "pushes": 0, "no_result": 0,
+           "profit": 0.0, "staked": 0.0}
+    for r in ipbl_get_rules():
+        st = ipbl_rule_stats(r["id"])
+        for k in ("signals", "wins", "losses", "pushes", "no_result", "profit", "staked"):
+            tot[k] += st[k]
+    settled = tot["wins"] + tot["losses"]
+    tot["winrate"] = (tot["wins"] / settled * 100) if settled else 0.0
+    tot["roi"] = (tot["profit"] / tot["staked"] * 100) if tot["staked"] else 0.0
+    tot["balance"] = BANKROLL_START + tot["profit"]
+    return tot
+
+
 # --- отправленные сигналы наборов (дедуп + отчёты) -------------------------
 
 def ipbl_sent_exists(rule_id: int, event_id: int) -> bool:

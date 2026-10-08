@@ -591,18 +591,18 @@ def stats_tm_text() -> str:
     """Статистика стратегии «Сигнал ТМ» (+ уведомления Prime-перерыва)."""
     lines = ["📊 <b>СТАТИСТИКА · СТРАТЕГИЯ IPBL</b>", "", _bal_line()]
     rules = database.ipbl_get_rules()
-    lines += ["", "", "🏀 <b>НАБОРЫ</b> (гипотетически, по истории перерывов)"]
+    lines += ["", "", "🏀 <b>НАБОРЫ</b> (по отправленным сигналам)"]
     if not rules:
         lines.append("Наборов ещё нет — добавь в «📋 Наборы IPBL».")
     else:
-        tot = database.ipbl_overall_stats_from_history()
-        lines.append(f"📌 Ставок: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']}")
+        tot = database.ipbl_overall_stats()
+        lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']}")
         if tot["wins"] + tot["losses"] > 0:
             bal = f"{tot['balance']:,.0f}".replace(",", " ")
             lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | 💰 {money(tot['profit'])}")
             lines.append(f"🏦 Баланс: {bal}₽")
         for r in rules:
-            st = database.ipbl_rule_stats_from_history(r)
+            st = database.ipbl_rule_stats(r["id"])
             divs = [f"{IPBL_DIV_LABELS[d].split()[0]} {r[f'zapas_{d}']:g}"
                     for d in IPBL_DIV_ORDER if r[f"zapas_{d}"] is not None]
             cmark = "" if r["chat_id"] is not None else " 🔕"
@@ -667,25 +667,25 @@ def _ipbl_overview() -> str:
 
 
 def _prime_market_block(market: str) -> list[str]:
-    """Блок статистики одного рынка Prime (ТМ или ИТМ1). Считается ГИПОТЕТИЧЕСКИ по
-    сборщику (prime_markets.db) по условиям наборов (минута + пары), чат — у набора."""
+    """Блок статистики одного рынка Prime (ТМ или ИТМ1) по реально отправленным
+    сигналам (prime_signals, status='sent'), чат — у набора."""
     label = PRIME_MARKETS.get(market, market)
-    lines = ["", f"🏀 <b>PRIME · {label}</b> (гипотетически, по сборщику)"]
+    lines = ["", f"🏀 <b>PRIME · {label}</b> (по отправленным сигналам)"]
     rules = prime_db.get_rules(market)
     if not rules:
         lines.append("Наборов ещё нет.")
         return lines
-    tot = prime_db.overall_stats_from_collector(market)
-    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+    tot = prime_db.overall_stats(market)
+    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}")
     for r in rules:
-        st = prime_db.rule_stats_from_collector(r)
+        st = prime_db.rule_stats(r["id"])
         cmark = "" if r["chat_id"] is not None else " 🔕"
         lines += ["", f"• мин {r['minute']} · пар {prime_db.count_pairs(r['id'])}{cmark}: "
-                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
             lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
@@ -2788,7 +2788,8 @@ def csreports_text() -> str:
 
 
 def _cage_market_block(market: str) -> list[str]:
-    """Блок статистики одного рынка CAGE (гипотетически по сборщику, по наборам)."""
+    """Блок статистики одного рынка CAGE по реально отправленным сигналам
+    (cage_signals, status='sent'), по наборам."""
     label = cage_strat_signals.market_label(market)
     cid = database.get_chat_id(CAGE_STRAT_CHAT[market])
     lines = ["", "", f"🏀 <b>CAGE · {label}</b>  "
@@ -2797,17 +2798,17 @@ def _cage_market_block(market: str) -> list[str]:
     if not rules:
         lines.append("Наборов нет.")
         return lines
-    tot = cage_strat_db.overall_stats_from_collector(market)
-    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+    tot = cage_strat_db.overall_stats(market)
+    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}")
     for r in rules:
-        st = cage_strat_db.rule_stats_from_collector(r)
+        st = cage_strat_db.rule_stats(r["id"])
         pairs = 'все пары' if r['all_pairs'] else 'пар ' + str(cage_strat_db.count_pairs(r['id']))
         lines += ["", f"• {label} · {cage_strat_signals.time_label(r['minute'])} · {pairs}: "
-                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
             lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
@@ -2817,9 +2818,8 @@ def _cage_market_block(market: str) -> list[str]:
 def cage_strat_stats_section() -> str:
     """Блок статистики стратегии CAGE (для общего экрана и экрана статистики).
 
-    Считается ГИПОТЕТИЧЕСКИ по сборщику (cage_markets.db) по настройкам наборов
-    (минута + пары/все пары + рынок), а не по реально отправленным сигналам."""
-    lines: list[str] = ["", "🏀 <b>СТРАТЕГИЯ CAGE</b> (гипотетически, по сборщику)"]
+    Считается по реально отправленным сигналам (cage_signals, status='sent')."""
+    lines: list[str] = ["", "🏀 <b>СТРАТЕГИЯ CAGE</b> (по отправленным сигналам)"]
     if not cage_strat_db.get_rules():
         lines.append("Наборов ещё нет — добавь в «🏀 Стратегия CAGE».")
         return "\n".join(lines)
@@ -3086,25 +3086,24 @@ def pwreports_text() -> str:
 def prime_women_stats_section() -> str:
     """Блок статистики стратегии Prime Ж (для общего экрана и экрана статистики).
 
-    Считается ГИПОТЕТИЧЕСКИ по сборщику (prime_women_markets.db) по настройкам
-    наборов (минута + пары), а не по реально отправленным сигналам."""
+    Считается по реально отправленным сигналам (pw_signals, status='sent')."""
     cid = database.get_chat_id(PW_STRAT_CODE)
-    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRIME Ж</b> (гипотетически, по сборщику)  "
+    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRIME Ж</b> (по отправленным сигналам)  "
              f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
     rules = prime_women_db.get_rules()
     if not rules:
         lines.append("Наборов ещё нет — добавь в «🏀 Стратегия Prime Ж».")
         return "\n".join(lines)
-    tot = prime_women_db.overall_stats_from_collector()
-    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+    tot = prime_women_db.overall_stats()
+    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}")
     for r in rules:
-        st = prime_women_db.rule_stats_from_collector(r)
+        st = prime_women_db.rule_stats(r["id"])
         lines += ["", f"• ТМ · мин {r['minute']} · пар {prime_women_db.count_pairs(r['id'])}: "
-                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
             lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
@@ -3390,25 +3389,24 @@ def proreports_text() -> str:
 def pro_stats_section() -> str:
     """Блок статистики стратегии Pro М (для общего экрана и экрана статистики).
 
-    Считается ГИПОТЕТИЧЕСКИ по сборщику (pro_markets.db) по настройкам наборов
-    (минута + пары), а не по реально отправленным сигналам."""
+    Считается по реально отправленным сигналам (pro_signals, status='sent')."""
     cid = database.get_chat_id(PRO_STRAT_CODE)
-    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRO М</b> (гипотетически, по сборщику)  "
+    lines = ["", "", "🏀 <b>СТРАТЕГИЯ PRO М</b> (по отправленным сигналам)  "
              f"(чат: {'<code>' + str(cid) + '</code>' if cid is not None else 'не задан'})"]
     rules = pro_strat_db.get_rules()
     if not rules:
         lines.append("Наборов ещё нет — добавь в «🏀 Стратегия Pro М».")
         return "\n".join(lines)
-    tot = pro_strat_db.overall_stats_from_collector()
-    lines.append(f"📌 Матчей: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
+    tot = pro_strat_db.overall_stats()
+    lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}")
     for r in rules:
-        st = pro_strat_db.rule_stats_from_collector(r)
+        st = pro_strat_db.rule_stats(r["id"])
         lines += ["", f"• ТМ · мин {r['minute']} · пар {pro_strat_db.count_pairs(r['id'])}: "
-                  f"матчей {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
+                  f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
             lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
