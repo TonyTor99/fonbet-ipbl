@@ -31,7 +31,7 @@ _state: dict[int, dict] = {}
 
 
 def _new_state() -> dict:
-    return {"tm_done": False, "info_done": False, "line_hist": []}
+    return {"tm_done": False, "info_done": False, "rules_done": False, "line_hist": []}
 
 
 # --- расписание ------------------------------------------------------------
@@ -434,12 +434,17 @@ def render_ipbl_rule_signal(s: dict) -> str:
 
 
 def _process_ipbl_rules(st: dict, state: dict, line, odds, formula):
-    """На перерыве: по каждому включённому набору с заданным чатом — если дивизион
-    матча включён (запас задан), формула проходит запас набора этого дивизиона, пара
-    проходит белый+чёрный список и сейчас график/дни набора — шлём сигнал ТМ в чат
-    набора. Дедуп по (набор, матч)."""
+    """На перерыве: считаем формулу ОДИН раз — на первом цикле перерыва, где уже есть
+    линия ТМ (снимок начала перерыва). Прогоняем по этому снимку все наборы разом: если
+    дивизион матча включён (запас задан), формула проходит запас набора этого дивизиона,
+    пара проходит белый+чёрный список и сейчас график/дни набора — сразу шлём сигнал ТМ
+    в чат набора. После этого ставим флаг rules_done и больше на этом перерыве НЕ
+    пересчитываем (иначе строгий набор «догонял» бы сползающую линию и уходил с задержкой).
+    Дедуп по (набор, матч)."""
+    if st.get("rules_done"):
+        return                                     # уже посчитали на этом перерыве
     if line is None or formula is None:
-        return
+        return                                     # тоталов ещё нет — ждём следующий цикл
     eid = state["event_id"]
     div = IPBL_DIV_BY_SPORT.get(state.get("sport_id"))
     if div is None:
@@ -461,6 +466,7 @@ def _process_ipbl_rules(st: dict, state: dict, line, odds, formula):
             _fire_ipbl_rule(rule, state, div, line, odds, formula)
         except Exception as e:
             log.warning("ipbl rule fire err rule=%s ev=%s: %s", rule["id"], eid, e)
+    st["rules_done"] = True                        # снимок перерыва зафиксирован
 
 
 def _fire_ipbl_rule(rule: dict, state: dict, div: str, line, odds, formula):
