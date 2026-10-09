@@ -10,6 +10,7 @@
 """
 import html
 import logging
+import time
 from datetime import datetime, time as dtime, timezone, timedelta
 
 import database
@@ -22,6 +23,16 @@ MSK = timezone(timedelta(hours=3))   # расписание стратегий �
 
 WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+# --- гейт «устаканивания» линии перерыва ------------------------------------
+# На перерыве линия ТМ Фонбета первые секунды «дрожит» и ещё не сформирована.
+# Если решать по самому первому циклу (особенно при малом POLL_INTERVAL) — ловим
+# раннюю линию и теряем сигналы, которые дозревают через несколько секунд.
+# Поэтому ждём, пока выбранная линия перестанет меняться BREAK_SETTLE_STABLE секунд
+# (линия сформировалась), но не дольше BREAK_SETTLE_CAP секунд от её первого появления
+# на перерыве — и только тогда считаем формулу ОДИН раз.
+BREAK_SETTLE_STABLE = 6.0    # сек: линия не менялась столько -> считаем устаканившейся
+BREAK_SETTLE_CAP = 12.0      # сек: максимум ждём от первого появления линии на перерыве
+
 
 def msk_now() -> datetime:
     return datetime.now(MSK)
@@ -31,7 +42,29 @@ _state: dict[int, dict] = {}
 
 
 def _new_state() -> dict:
-    return {"tm_done": False, "info_done": False, "rules_done": False, "line_hist": []}
+    return {"tm_done": False, "info_done": False, "rules_done": False, "line_hist": [],
+            "break_t0": None, "settle_line": None, "settle_since": None}
+
+
+def _break_settled(st: dict, line) -> bool:
+    """True, когда линию перерыва пора фиксировать: она не менялась BREAK_SETTLE_STABLE
+    секунд ИЛИ прошёл потолок BREAK_SETTLE_CAP от первого появления линии на перерыве.
+    Пока линии ещё нет (тоталов нет) — ждём (False). На первом цикле с линией тоже ждём:
+    нужно хотя бы одно повторное наблюдение, чтобы понять, что линия сформировалась."""
+    if line is None:
+        return False
+    now = time.monotonic()
+    if st.get("break_t0") is None:
+        st["break_t0"] = now
+        st["settle_line"] = line
+        st["settle_since"] = now
+        return False
+    if line != st.get("settle_line"):
+        st["settle_line"] = line
+        st["settle_since"] = now
+    stable_for = now - st["settle_since"]
+    elapsed = now - st["break_t0"]
+    return stable_for >= BREAK_SETTLE_STABLE or elapsed >= BREAK_SETTLE_CAP
 
 
 # --- расписание ------------------------------------------------------------
@@ -515,6 +548,11 @@ def process_match(state: dict):
     line = chosen["line"] if chosen else None
     odds = chosen["odds"] if chosen else None
     formula = (2 * state["half_total"] - line) if line is not None else None
+
+    # ждём, пока линия перерыва сформируется (устаканится), и только тогда — один раз
+    # считаем снимок/наборы. До этого момента ничего не шлём (dedup-флаги не трогаем).
+    if not _break_settled(st, line):
+        return
 
     try:
         _process_signal_tm(st, state)        # снимок в историю (signals) — без отправки
