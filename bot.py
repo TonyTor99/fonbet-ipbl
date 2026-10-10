@@ -599,7 +599,7 @@ def stats_tm_text() -> str:
         lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']}")
         if tot["wins"] + tot["losses"] > 0:
             bal = f"{tot['balance']:,.0f}".replace(",", " ")
-            lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | 💰 {money(tot['profit'])}")
+            lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | 💰 {money(tot['profit'])}</b>")
             lines.append(f"🏦 Баланс: {bal}₽")
         for r in rules:
             st = database.ipbl_rule_stats(r["id"])
@@ -609,7 +609,7 @@ def stats_tm_text() -> str:
             lines += ["", f"• #{r['id']} {'/'.join(divs) if divs else 'нет див.'}{cmark}: "
                       f"ставок {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']}"]
             if st["wins"] + st["losses"] > 0:
-                lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+                lines.append(f"  <b>🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}</b>")
 
     s = database.bot_stats("prime_info")
     lines += ["", "", "🔔 <b>PRIME ПЕРЕРЫВ</b>", f"Уведомлений в перерыве: {s['matches']}"]
@@ -679,8 +679,8 @@ def _prime_market_block(market: str) -> list[str]:
     lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
-                     f"💰 {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}</b>")
     for r in rules:
         st = prime_db.rule_stats(r["id"])
         cmark = "" if r["chat_id"] is not None else " 🔕"
@@ -688,7 +688,7 @@ def _prime_market_block(market: str) -> list[str]:
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+            lines.append(f"  <b>🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}</b>")
     return lines
 
 
@@ -713,9 +713,9 @@ def sh_stats_section() -> str:
     lines.append(f"✅ Плюсовые: {tot['wins']} | ❌ Минусовые: {tot['losses']} | ⏸️ Без итога: {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         bal = f"{tot['balance']:,.0f}".replace(",", " ")
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}%")
-        lines.append(f"🧮 ROI: {tot['roi']:+.1f}%")
-        lines.append(f"💰 Прибыль: {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}%</b>")
+        lines.append(f"<b>🧮 ROI: {tot['roi']:+.1f}%</b>")
+        lines.append(f"<b>💰 Прибыль: {money(tot['profit'])}</b>")
         lines.append(f"🏦 Баланс: {bal}₽")
     # разбивка по правилам (лигам)
     for r in rules:
@@ -728,8 +728,8 @@ def sh_stats_section() -> str:
         lines.append(f"📌 Сигналов: {st['signals']}")
         lines.append(f"✅ {st['wins']} | ❌ {st['losses']} | ⏸️ {st['no_result']}")
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"🎯 Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
-            lines.append(f"💰 Прибыль: {money(st['profit'])}")
+            lines.append(f"<b>🎯 Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%</b>")
+            lines.append(f"<b>💰 Прибыль: {money(st['profit'])}</b>")
     return "\n".join(lines)
 
 
@@ -747,9 +747,9 @@ def sh_total_stats_section() -> str:
                  f"↩️ Возвраты: {tot['pushes']} | ⏸️ Без итога: {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
         bal = f"{tot['balance']:,.0f}".replace(",", " ")
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}%")
-        lines.append(f"🧮 ROI: {tot['roi']:+.1f}%")
-        lines.append(f"💰 Прибыль: {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}%</b>")
+        lines.append(f"<b>🧮 ROI: {tot['roi']:+.1f}%</b>")
+        lines.append(f"<b>💰 Прибыль: {money(tot['profit'])}</b>")
         lines.append(f"🏦 Баланс: {bal}₽")
     for r in rules:
         st = database.sh_total_rule_stats(r["id"])
@@ -761,8 +761,8 @@ def sh_total_stats_section() -> str:
         lines.append(f"📌 Сигналов: {st['signals']}")
         lines.append(f"✅ {st['wins']} | ❌ {st['losses']} | ↩️ {st['pushes']} | ⏸️ {st['no_result']}")
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"🎯 Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%")
-            lines.append(f"💰 Прибыль: {money(st['profit'])}")
+            lines.append(f"<b>🎯 Винрейт: {st['winrate']:.0f}% | ROI: {st['roi']:+.1f}%</b>")
+            lines.append(f"<b>💰 Прибыль: {money(st['profit'])}</b>")
     return "\n".join(lines)
 
 
@@ -2474,8 +2474,8 @@ def sh_pair_stats_section() -> str:
     lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
-                     f"💰 {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}</b>")
     for r in rules:
         st = sh_pair_db.rule_stats(r["id"])
         if st["signals"] == 0:
@@ -2486,7 +2486,7 @@ def sh_pair_stats_section() -> str:
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+            lines.append(f"  <b>🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}</b>")
     return "\n".join(lines)
 
 
@@ -2802,8 +2802,8 @@ def _cage_market_block(market: str) -> list[str]:
     lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
-                     f"💰 {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}</b>")
     for r in rules:
         st = cage_strat_db.rule_stats(r["id"])
         pairs = 'все пары' if r['all_pairs'] else 'пар ' + str(cage_strat_db.count_pairs(r['id']))
@@ -2811,7 +2811,7 @@ def _cage_market_block(market: str) -> list[str]:
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+            lines.append(f"  <b>🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}</b>")
     return lines
 
 
@@ -3098,15 +3098,15 @@ def prime_women_stats_section() -> str:
     lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
-                     f"💰 {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}</b>")
     for r in rules:
         st = prime_women_db.rule_stats(r["id"])
         lines += ["", f"• ТМ · мин {r['minute']} · пар {prime_women_db.count_pairs(r['id'])}: "
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+            lines.append(f"  <b>🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}</b>")
     return "\n".join(lines)
 
 
@@ -3401,15 +3401,15 @@ def pro_stats_section() -> str:
     lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
-                     f"💰 {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}</b>")
     for r in rules:
         st = pro_strat_db.rule_stats(r["id"])
         lines += ["", f"• ТМ · мин {r['minute']} · пар {pro_strat_db.count_pairs(r['id'])}: "
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+            lines.append(f"  <b>🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}</b>")
     return "\n".join(lines)
 
 
@@ -3682,8 +3682,8 @@ def pq_stats_section() -> str:
     lines.append(f"📌 Сигналов: {tot['signals']} | ✅ {tot['wins']} | ❌ {tot['losses']} | "
                  f"↩️ {tot['pushes']} | ⏸️ {tot['no_result']}")
     if tot["wins"] + tot["losses"] > 0:
-        lines.append(f"📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
-                     f"💰 {money(tot['profit'])}")
+        lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
+                     f"💰 {money(tot['profit'])}</b>")
     for r in rules:
         st = pq_db.rule_stats(r["id"])
         if st["signals"] == 0:
@@ -3692,7 +3692,7 @@ def pq_stats_section() -> str:
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
-            lines.append(f"  🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}")
+            lines.append(f"  <b>🎯 WR {st['winrate']:.0f}% · ROI {st['roi']:+.1f}% · {money(st['profit'])}</b>")
     return "\n".join(lines)
 
 

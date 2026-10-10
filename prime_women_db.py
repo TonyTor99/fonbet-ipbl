@@ -464,6 +464,19 @@ def profit_total(start: str, end: str) -> float:
     return v
 
 
+def daily_counts(day: str) -> dict:
+    """Счётчики исходов (В/П/Возврат) за один день ('YYYY-MM-DD') по отправленным
+    сигналам — для строки «N✅/N✖️/N♻️» в отчёте дня."""
+    conn = _conn()
+    base = "FROM pw_signals WHERE status='sent' AND date(created_at)=?"
+    args = (day,)
+    wins   = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", args).fetchone()[0]
+    losses = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", args).fetchone()[0]
+    pushes = conn.execute(f"SELECT COUNT(*) {base} AND result='Возврат'", args).fetchone()[0]
+    conn.close()
+    return {"wins": wins, "losses": losses, "pushes": pushes}
+
+
 def signals_for_export() -> list[dict]:
     conn = _conn()
     rows = conn.execute(

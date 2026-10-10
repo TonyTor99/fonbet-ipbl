@@ -616,6 +616,19 @@ def profit_total_rule(rule_id: int, start: str, end: str) -> float:
     return v
 
 
+def daily_counts_rule(rule_id: int, day: str) -> dict:
+    """Счётчики исходов (В/П/Возврат) ОДНОГО набора за один день ('YYYY-MM-DD')
+    по реально отправленным сигналам — для строки «N✅/N✖️/N♻️» в отчёте дня."""
+    conn = _conn()
+    base = "FROM prime_signals WHERE status='sent' AND rule_id=? AND date(created_at)=?"
+    args = (rule_id, day)
+    wins   = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", args).fetchone()[0]
+    losses = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", args).fetchone()[0]
+    pushes = conn.execute(f"SELECT COUNT(*) {base} AND result='Возврат'", args).fetchone()[0]
+    conn.close()
+    return {"wins": wins, "losses": losses, "pushes": pushes}
+
+
 def signals_for_export(market: str | None = None) -> list[dict]:
     """Отправленные сигналы стратегии для Excel-выгрузки. market — фильтр по рынку."""
     conn = _conn()

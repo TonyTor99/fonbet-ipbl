@@ -35,6 +35,12 @@ def _pct(profit: float) -> float:
     return profit / BANKROLL_START * 100.0
 
 
+def _counts_line(c: dict) -> str:
+    """'7✅/2✖️/0♻️' — счётчики исходов дня (выигрыши/проигрыши/возвраты),
+    единый формат для всех стратегий (как в отчёте IPBL)."""
+    return f"{c['wins']}✅/{c['losses']}✖️/{c['pushes']}♻️"
+
+
 def _day_line(d: date, profit: float) -> str:
     """'20.07 ✖️-6.00%' — дата, эмодзи по знаку, процент без знака «+»."""
     p = _pct(profit)
@@ -124,9 +130,11 @@ def build_ipbl_rule_daily_text(rule: dict, now: datetime | None = None,
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
     total = database.ipbl_profit_total_rule(rule["id"], day.isoformat(), day.isoformat())
+    cnt = database.ipbl_daily_counts_rule(rule["id"], day.isoformat())
     return "\n".join([
         _ipbl_rule_header(rule),
         GREETING,
+        _counts_line(cnt),
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
@@ -176,9 +184,11 @@ def build_prime_rule_daily_text(rule: dict, now: datetime | None = None,
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
     total = prime_db.profit_total_rule(rule["id"], day.isoformat(), day.isoformat())
+    cnt = prime_db.daily_counts_rule(rule["id"], day.isoformat())
     return "\n".join([
         _prime_rule_header(rule),
         GREETING,
+        _counts_line(cnt),
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
@@ -222,9 +232,11 @@ def build_sh_pair_daily_text(now: datetime | None = None, day: date | None = Non
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
     total = sh_pair_db.profit_total(day.isoformat(), day.isoformat())
+    cnt = sh_pair_db.daily_counts(day.isoformat())
     return "\n".join([
         SH_PAIR_HEADER,
         GREETING,
+        _counts_line(cnt),
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
@@ -266,9 +278,11 @@ def build_pq_daily_text(now: datetime | None = None, day: date | None = None) ->
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
     total = pq_db.profit_total(day.isoformat(), day.isoformat())
+    cnt = pq_db.daily_counts(day.isoformat())
     return "\n".join([
         PQ_HEADER,
         GREETING,
+        _counts_line(cnt),
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
@@ -317,9 +331,11 @@ def build_cage_strat_daily_text(now: datetime | None = None, day: date | None = 
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
     total = cage_strat_db.profit_total(day.isoformat(), day.isoformat(), market)
+    cnt = cage_strat_db.daily_counts(day.isoformat(), market)
     return "\n".join([
         _cage_header(market),
         GREETING,
+        _counts_line(cnt),
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
@@ -361,9 +377,11 @@ def build_pw_daily_text(now: datetime | None = None, day: date | None = None) ->
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
     total = prime_women_db.profit_total(day.isoformat(), day.isoformat())
+    cnt = prime_women_db.daily_counts(day.isoformat())
     return "\n".join([
         PW_HEADER,
         GREETING,
+        _counts_line(cnt),
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 
@@ -405,9 +423,11 @@ def build_pro_daily_text(now: datetime | None = None, day: date | None = None) -
     now = now or datetime.now(MSK)
     day = day or (now.date() - timedelta(days=1))
     total = pro_strat_db.profit_total(day.isoformat(), day.isoformat())
+    cnt = pro_strat_db.daily_counts(day.isoformat())
     return "\n".join([
         PRO_HEADER,
         GREETING,
+        _counts_line(cnt),
         f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
     ])
 

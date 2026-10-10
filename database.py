@@ -1040,6 +1040,19 @@ def ipbl_profit_total_rule(rule_id: int, start: str, end: str) -> float:
     return v
 
 
+def ipbl_daily_counts_rule(rule_id: int, day: str) -> dict:
+    """Счётчики исходов (В/П/Возврат) ОДНОГО набора IPBL за один день ('YYYY-MM-DD')
+    по реально отправленным сигналам — для строки «N✅/N✖️/N♻️» в отчёте дня."""
+    conn = _conn()
+    base = "FROM ipbl_sent WHERE status='sent' AND rule_id=? AND date(created_at)=?"
+    args = (rule_id, day)
+    wins   = conn.execute(f"SELECT COUNT(*) {base} AND result='Выигрыш'", args).fetchone()[0]
+    losses = conn.execute(f"SELECT COUNT(*) {base} AND result='Проигрыш'", args).fetchone()[0]
+    pushes = conn.execute(f"SELECT COUNT(*) {base} AND result='Возврат'", args).fetchone()[0]
+    conn.close()
+    return {"wins": wins, "losses": losses, "pushes": pushes}
+
+
 # ===========================================================================
 # Стратегия шорт-хоккея: правила по лигам + отправленные сигналы.
 # ===========================================================================

@@ -593,6 +593,21 @@ def profit_total(start: str, end: str, market: str | None = None) -> float:
     return v
 
 
+def daily_counts(day: str, market: str | None = None) -> dict:
+    """Счётчики исходов (В/П/Возврат) за один день ('YYYY-MM-DD') по отправленным
+    сигналам (опц. фильтр по рынку) — для строки «N✅/N✖️/N♻️» в отчёте дня."""
+    conn = _conn()
+    base = "FROM cage_signals WHERE status='sent' AND date(created_at)=?"
+    tail = " AND market=?" if market is not None else ""
+    def cnt(result: str) -> int:
+        args = [day] + ([market] if market is not None else [])
+        return conn.execute(
+            f"SELECT COUNT(*) {base}{tail} AND result=?", args + [result]).fetchone()[0]
+    wins, losses, pushes = cnt("Выигрыш"), cnt("Проигрыш"), cnt("Возврат")
+    conn.close()
+    return {"wins": wins, "losses": losses, "pushes": pushes}
+
+
 def signals_for_export(market: str | None = None) -> list[dict]:
     """Отправленные сигналы стратегии для Excel-выгрузки. market — фильтр по рынку."""
     conn = _conn()
