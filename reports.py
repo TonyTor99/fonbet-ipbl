@@ -22,7 +22,7 @@ import pq_db
 import cage_strat_db
 import prime_women_db
 import pro_strat_db
-from config import BANKROLL_START, IPBL_DIV_LABELS, IPBL_DIV_ORDER
+from config import BANKROLL_START
 
 MSK = timezone(timedelta(hours=3))
 
@@ -119,10 +119,7 @@ def build_monthly_text(now: datetime | None = None) -> str:
 # ===========================================================================
 
 def _ipbl_rule_header(rule: dict) -> str:
-    zaps = [f"{IPBL_DIV_LABELS[d]} {rule[f'zapas_{d}']:g}"
-            for d in IPBL_DIV_ORDER if rule[f"zapas_{d}"] is not None]
-    tail = "; ".join(zaps) if zaps else "дивизионы не заданы"
-    return f"Стратегия IPBL · набор #{rule['id']} ({tail})"
+    return f"Стратегия IPBL · набор #{rule['id']}"
 
 
 def build_ipbl_rule_daily_text(rule: dict, now: datetime | None = None,
