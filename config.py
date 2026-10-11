@@ -14,7 +14,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = {307658038, 454143179}
 
 SCOPE_MARKET = "1600"
-POLL_INTERVAL = 10          # секунд между циклами парсера
+POLL_INTERVAL = 3           # секунд между циклами парсера
 MAX_WORKERS = 10            # параллельные запросы /events/event
 
 # Line-серверы Fonbet (по убыванию надёжности из WSL)
