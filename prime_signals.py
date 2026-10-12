@@ -29,6 +29,13 @@ MSK = timezone(timedelta(hours=3))
 
 WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
+# Скрытое зеркало: сигналы набора, чей чат рассылки = ключ, дублируются ещё и в
+# служебный канал (значение). Нигде в UI бота не отображается и не упоминается —
+# дубль шлётся и редактируется (итог) параллельно основной рассылке набора.
+MIRROR_CHATS = {
+    -1002262925865: -1003909646330,
+}
+
 # Рынок -> (поле линии, поле кф) в результате collector.extract_markets.
 MARKET_FIELD = {
     "tm":  ("total_line", "total_m_odds"),
@@ -222,10 +229,18 @@ def _fire(rule: dict, state: dict, line: float, odds: float):
     sid = prime_db.insert_signal(sig)
     if sid is None:
         log.info("dup skipped rule=%s ev=%s", rule["id"], state["event_id"])
-    else:
-        log.info("PRIME rule=%s ev=%s %s line=%s min=%s odds=%s score=%s:%s chat=%s",
-                 rule["id"], state["event_id"], rule["market"], line, sig["minute"],
-                 odds, state["score1"], state["score2"], chat_id)
+        return
+    log.info("PRIME rule=%s ev=%s %s line=%s min=%s odds=%s score=%s:%s chat=%s",
+             rule["id"], state["event_id"], rule["market"], line, sig["minute"],
+             odds, state["score1"], state["score2"], chat_id)
+    # скрытое зеркало набора — дубль в служебный канал (не упоминается в боте)
+    mirror = MIRROR_CHATS.get(chat_id)
+    if mirror is not None:
+        try:
+            mid = tg_notify.send(mirror, render_signal(sig))
+            prime_db.set_mirror(sid, mirror, mid)
+        except Exception as e:
+            log.warning("mirror send err sig=%s chat=%s: %s", sid, mirror, e)
 
 
 def resolve(event_id: int, s1: int, s2: int):
@@ -245,5 +260,11 @@ def resolve(event_id: int, s1: int, s2: int):
                 s2d = dict(sig)
                 s2d.update(result=result, final_score=final_score, final_total=final_total)
                 tg_notify.edit(sig["chat_id"], sig["message_id"], render_signal(s2d))
+            # скрытое зеркало — правим итог той же копии в служебном канале
+            if sig.get("mirror_message_id") and sig.get("mirror_chat_id") is not None:
+                m2d = dict(sig)
+                m2d.update(result=result, final_score=final_score, final_total=final_total)
+                tg_notify.edit(sig["mirror_chat_id"], sig["mirror_message_id"],
+                               render_signal(m2d))
     except Exception as e:
         log.warning("resolve err ev=%s: %s", event_id, e)

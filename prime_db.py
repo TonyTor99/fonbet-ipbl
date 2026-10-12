@@ -111,6 +111,15 @@ def init_db():
     ):
         if col not in cols:
             conn.execute(ddl)
+    # Миграция: скрытое зеркало отправленного сигнала (дубль в служебный канал,
+    # не отображается в UI) — свой chat_id/message_id для редактирования итога.
+    scols = {r[1] for r in conn.execute("PRAGMA table_info(prime_signals)")}
+    for col, ddl in (
+        ("mirror_chat_id",    "ALTER TABLE prime_signals ADD COLUMN mirror_chat_id INTEGER"),
+        ("mirror_message_id", "ALTER TABLE prime_signals ADD COLUMN mirror_message_id INTEGER"),
+    ):
+        if col not in scols:
+            conn.execute(ddl)
     conn.commit()
     conn.close()
 
@@ -359,6 +368,16 @@ def insert_signal(sig: dict) -> int | None:
         return None
     finally:
         conn.close()
+
+
+def set_mirror(signal_id: int, chat_id: int, message_id: int | None):
+    """Сохраняет chat/message_id зеркальной копии сигнала (скрытый канал)."""
+    conn = _conn()
+    conn.execute(
+        "UPDATE prime_signals SET mirror_chat_id=?, mirror_message_id=? WHERE id=?",
+        (chat_id, message_id, signal_id))
+    conn.commit()
+    conn.close()
 
 
 def get_signals_for_event(event_id: int) -> list[dict]:
