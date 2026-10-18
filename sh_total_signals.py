@@ -18,8 +18,10 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 import database
+import signals
 import tg_notify
 from config import SH_TOTAL_STRAT_CODE, sh_short_league, sh_league_key
+from sh_config import PREMATCH_MINUTE
 
 log = logging.getLogger("sh_total_signals")
 MSK = timezone(timedelta(hours=3))
@@ -45,6 +47,11 @@ def fmt_range(a: float, b: float) -> str:
 
 def side_label(code: str) -> str:
     return SIDE_LABEL.get(code, code)
+
+
+def time_label(minute: int) -> str:
+    """Подпись момента срабатывания: прематч или игровая минута."""
+    return "Прематч" if minute == PREMATCH_MINUTE else f"Минута {minute}"
 
 
 def fmt_teams(team1: str, team2: str) -> str:
@@ -73,7 +80,7 @@ def render_signal(sig: dict) -> str:
         f"🏆 <b>{league}</b>",
         fmt_teams(sig["team1"], sig["team2"]),
         "",
-        f"⏱ <b>Минута {sig['rule_minute']}</b>",
+        f"⏱ <b>{time_label(sig['rule_minute'])}</b>",
         f"📊 <b>Счёт {sig['score1']}:{sig['score2']}</b>",
         "",
         f"🎯 <b>Ставка {side_label(sig['side'])} {fmt_num(sig['line'])} @{fmt_num(sig['odds'])}</b>",
@@ -96,11 +103,10 @@ def render_signal(sig: dict) -> str:
 # --- точки входа -----------------------------------------------------------
 
 def process_match(state: dict, markets: dict):
-    """Вызывается каждый цикл sh_parser для каждого live-матча шорт-хоккея."""
-    if state.get("prematch"):
-        return
+    """Вызывается каждый цикл sh_parser для каждого матча шорт-хоккея (в т.ч. прематч)."""
     league = state["league"]
-    minute = state["minute"]
+    # Момент срабатывания: прематч -> сентинел PREMATCH_MINUTE; иначе игровая минута.
+    point = PREMATCH_MINUTE if state.get("prematch") else state["minute"]
 
     # Лига сопоставляется без хвостового формата 'NxM' (sh_league_key).
     lk = sh_league_key(league)
@@ -112,19 +118,26 @@ def process_match(state: dict, markets: dict):
     line = markets.get("total_line")
     if line is None:
         # рынок тотала на этом снимке отсутствует — попробуем на след. цикле,
-        # пока игровая минута ещё равна заданной (дедуп не ставим)
+        # пока момент (минута/прематч) ещё совпадает (дедуп не ставим)
         return
 
     for rule in rules:
-        if minute != rule["minute"]:
+        if point != rule["minute"]:
             continue
+        if not signals.ipbl_rule_active_now(rule):
+            continue  # вне графика работы / дня недели правила — молчим
         if database.sh_total_signal_exists(rule["id"], state["event_id"]):
             continue
         if not (rule["line_min"] <= line <= rule["line_max"]):
-            # линия вне диапазона — ждём следующий цикл этой же минуты (линия двигается)
+            # линия вне диапазона — ждём следующий цикл этого же момента (линия двигается)
             continue
         odds = markets.get(SIDE_FIELD[rule["side"]])
         if odds is None:
+            continue
+        omin = rule["odds_min"] if rule["odds_min"] is not None else 1.0
+        omax = rule["odds_max"] if rule["odds_max"] is not None else 999.0
+        if not (omin <= odds <= omax):
+            # кф стороны вне диапазона — ждём следующий цикл (кф двигается)
             continue
         try:
             _fire(rule, state, line, odds)

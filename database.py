@@ -171,10 +171,14 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sh_total_rules (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             sport_name TEXT NOT NULL,               -- ПОЛНОЕ название лиги
-            minute     INTEGER NOT NULL,            -- игровая минута сигнала (строго ==)
+            minute     INTEGER NOT NULL,            -- игровая минута сигнала (строго ==); -1 = прематч
             side       TEXT NOT NULL,               -- 'over' (ТБ) | 'under' (ТМ)
             line_min   REAL NOT NULL,               -- нижняя граница линии тотала
             line_max   REAL NOT NULL,               -- верхняя граница линии тотала
+            odds_min   REAL NOT NULL DEFAULT 1.0,   -- нижняя граница кф стороны (фильтр)
+            odds_max   REAL NOT NULL DEFAULT 999.0,  -- верхняя граница кф стороны (фильтр)
+            windows    TEXT,                        -- график работы 'HH:MM-HH:MM,...' (NULL = круглосуточно)
+            weekdays   TEXT,                        -- дни недели CSV '0..6' Пн..Вс (NULL/'' = все дни)
             enabled    INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         );
@@ -229,6 +233,11 @@ def init_db():
         ("windows", "ALTER TABLE bot_config ADD COLUMN windows TEXT"),
         ("threshold", "ALTER TABLE bot_config ADD COLUMN threshold REAL"),
         ("lc_threshold", "ALTER TABLE league_config ADD COLUMN threshold REAL"),
+        # Стратегия тоталов: фильтр кф + график/дни работы правила (per-rule).
+        ("sht_odds_min", "ALTER TABLE sh_total_rules ADD COLUMN odds_min REAL NOT NULL DEFAULT 1.0"),
+        ("sht_odds_max", "ALTER TABLE sh_total_rules ADD COLUMN odds_max REAL NOT NULL DEFAULT 999.0"),
+        ("sht_windows", "ALTER TABLE sh_total_rules ADD COLUMN windows TEXT"),
+        ("sht_weekdays", "ALTER TABLE sh_total_rules ADD COLUMN weekdays TEXT"),
     ]:
         try:
             conn.execute(ddl)
@@ -1239,12 +1248,15 @@ def sh_total_get_rule(rule_id: int) -> dict | None:
 
 
 def sh_total_add_rule(sport_name: str, minute: int, side: str,
-                      line_min: float, line_max: float) -> int:
+                      line_min: float, line_max: float,
+                      odds_min: float = 1.0, odds_max: float = 999.0) -> int:
     conn = _conn()
     cur = conn.execute(
-        "INSERT INTO sh_total_rules (sport_name, minute, side, line_min, line_max, enabled, created_at) "
-        "VALUES (?, ?, ?, ?, ?, 1, ?)",
+        "INSERT INTO sh_total_rules "
+        "(sport_name, minute, side, line_min, line_max, odds_min, odds_max, enabled, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
         (sport_name, int(minute), side, float(line_min), float(line_max),
+         float(odds_min), float(odds_max),
          datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     )
     conn.commit()
@@ -1254,12 +1266,32 @@ def sh_total_add_rule(sport_name: str, minute: int, side: str,
 
 
 def sh_total_update_rule(rule_id: int, minute: int, side: str,
-                         line_min: float, line_max: float):
+                         line_min: float, line_max: float,
+                         odds_min: float = 1.0, odds_max: float = 999.0):
     conn = _conn()
     conn.execute(
-        "UPDATE sh_total_rules SET minute=?, side=?, line_min=?, line_max=? WHERE id=?",
-        (int(minute), side, float(line_min), float(line_max), rule_id),
+        "UPDATE sh_total_rules SET minute=?, side=?, line_min=?, line_max=?, "
+        "odds_min=?, odds_max=? WHERE id=?",
+        (int(minute), side, float(line_min), float(line_max),
+         float(odds_min), float(odds_max), rule_id),
     )
+    conn.commit()
+    conn.close()
+
+
+def sh_total_update_rule_windows(rule_id: int, windows: str | None):
+    """windows — нормализованная строка 'HH:MM-HH:MM,...' или None = круглосуточно."""
+    conn = _conn()
+    conn.execute("UPDATE sh_total_rules SET windows=? WHERE id=?", (windows, rule_id))
+    conn.commit()
+    conn.close()
+
+
+def sh_total_update_rule_weekdays(rule_id: int, weekdays: str | None):
+    """weekdays — CSV индексов дней '0,1,..6' (Пн..Вс) или None/'' = все дни."""
+    conn = _conn()
+    conn.execute("UPDATE sh_total_rules SET weekdays=? WHERE id=?",
+                 (weekdays or None, rule_id))
     conn.commit()
     conn.close()
 

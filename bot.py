@@ -61,6 +61,7 @@ from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     CAGE_STRAT_CODE, CAGE_STRAT_CODE_TM, CAGE_STRAT_CHAT,
                     CAGE_STRAT_MARKETS, CAGE_STRAT_PREMATCH, PW_STRAT_CODE,
                     PRO_STRAT_CODE, IPBL_DIV_LABELS, IPBL_DIV_ORDER, IPBL_DIV_BY_SPORT)
+from sh_config import PREMATCH_MINUTE
 
 DIR = Path(__file__).parent
 LOG_FILE = DIR / "parser.log"
@@ -681,10 +682,12 @@ def _prime_market_block(market: str) -> list[str]:
     if tot["wins"] + tot["losses"] > 0:
         lines.append(f"<b>📈 Винрейт: {tot['winrate']:.0f}% | 🧮 ROI: {tot['roi']:+.1f}% | "
                      f"💰 {money(tot['profit'])}</b>")
+    nos = prime_rule_nos()
     for r in rules:
         st = prime_db.rule_stats(r["id"])
         cmark = "" if r["chat_id"] is not None else " 🔕"
-        lines += ["", f"• мин {r['minute']} · пар {prime_db.count_pairs(r['id'])}{cmark}: "
+        lines += ["", f"• <b>№{nos.get(r['id'], '?')}</b> · мин {r['minute']} · "
+                  f"пар {prime_db.count_pairs(r['id'])}{cmark}: "
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
@@ -756,8 +759,8 @@ def sh_total_stats_section() -> str:
         if st["signals"] == 0:
             continue
         lines += ["", f"🏒 <b>{sh_short_league(r['sport_name'])}</b> "
-                  f"(мин {r['minute']} · {sh_total_signals.side_label(r['side'])} · "
-                  f"{sh_total_signals.fmt_range(r['line_min'], r['line_max'])})"]
+                  f"({sh_total_signals.time_label(r['minute'])} · {sh_total_signals.side_label(r['side'])} · "
+                  f"{sh_total_signals.fmt_range(r['line_min'], r['line_max'])} · кф {_sht_odds_label(r)})"]
         lines.append(f"📌 Сигналов: {st['signals']}")
         lines.append(f"✅ {st['wins']} | ❌ {st['losses']} | ↩️ {st['pushes']} | ⏸️ {st['no_result']}")
         if st["wins"] + st["losses"] > 0:
@@ -1495,21 +1498,32 @@ _SIDE_ALIASES = {
     "тм": "under", "м": "under", "under": "under", "u": "under", "tm": "under",
 }
 
+# Слова в поле «минута», означающие срабатывание на прематче (до старта игры).
+_PREMATCH_ALIASES = {"прематч", "пм", "pre", "prematch", "pm"}
+
 
 def parse_sh_total_rule_input(raw: str):
-    """'15 ТБ 8.5 12.5' -> (minute, side, line_min, line_max) или None при ошибке.
+    """'15 ТБ 8.5 12.5' или 'прематч ТБ 8.5 12.5 1.8 2.3'
+    -> (minute, side, line_min, line_max, odds_min, odds_max) или None при ошибке.
 
-    Порядок: минута, сторона (ТБ/ТМ), линия_от, линия_до. Границы можно в любом
-    порядке — упорядочим сами."""
+    Порядок: минута, сторона (ТБ/ТМ), линия_от, линия_до [, кф_от, кф_до].
+    В поле минуты можно писать «прематч» (срабатывание до старта матча).
+    Диапазон кф опционален — без него принимается любой кф. Границы (линии и кф)
+    можно задавать в любом порядке — упорядочим сами."""
     parts = raw.replace(",", ".").split()
-    if len(parts) != 4:
+    if len(parts) not in (4, 6):
         return None
-    try:
-        minute = int(parts[0])
-    except ValueError:
-        return None
-    if minute < 0:
-        return None
+    # Момент: число-минута или слово «прематч» -> сентинел PREMATCH_MINUTE.
+    first = parts[0].lower()
+    if first in _PREMATCH_ALIASES:
+        minute = PREMATCH_MINUTE
+    else:
+        try:
+            minute = int(parts[0])
+        except ValueError:
+            return None
+        if minute < 0:
+            return None
     side = _SIDE_ALIASES.get(parts[1].lower())
     if side is None:
         return None
@@ -1520,12 +1534,31 @@ def parse_sh_total_rule_input(raw: str):
     if a <= 0 or b <= 0:
         return None
     line_min, line_max = (a, b) if a <= b else (b, a)
-    return minute, side, line_min, line_max
+    odds_min, odds_max = 1.0, 999.0
+    if len(parts) == 6:
+        try:
+            c, d = float(parts[4]), float(parts[5])
+        except ValueError:
+            return None
+        if c <= 0 or d <= 0:
+            return None
+        odds_min, odds_max = (c, d) if c <= d else (d, c)
+    return minute, side, line_min, line_max, odds_min, odds_max
+
+
+def _sht_odds_label(rule: dict) -> str:
+    """Подпись диапазона кф правила тоталов ('любой', если фильтр не задан)."""
+    omin = rule["odds_min"] if rule.get("odds_min") is not None else 1.0
+    omax = rule["odds_max"] if rule.get("odds_max") is not None else 999.0
+    if omin <= 1.0 and omax >= 999.0:
+        return "любой"
+    return sh_total_signals.fmt_range(omin, omax)
 
 
 def sh_total_rule_label(rule: dict) -> str:
     mark = "✅" if rule["enabled"] else "🚫"
-    return (f"{mark} {sh_short_league(rule['sport_name'])} · мин {rule['minute']} · "
+    return (f"{mark} {sh_short_league(rule['sport_name'])} · "
+            f"{sh_total_signals.time_label(rule['minute'])} · "
             f"{sh_total_signals.side_label(rule['side'])} · "
             f"{sh_total_signals.fmt_range(rule['line_min'], rule['line_max'])}")
 
@@ -1553,8 +1586,9 @@ def shtstrat_text() -> str:
         f"Сборщик: {'🟢 работает' if sh_parser_running() else '🔴 остановлен'}\n"
         f"Чат отправки: {'<code>' + str(cid) + '</code>' if cid is not None else '❗️ не задан'}\n"
         f"Правил: {len(rules)} (включено {on})\n\n"
-        "Бот ищет сигналы ТОЛЬКО по настроенным лигам: на заданной минуте матча "
-        "проверяет линию тотала и, если она в диапазоне, шлёт сигнал ТБ/ТМ.\n"
+        "Бот ищет сигналы ТОЛЬКО по настроенным лигам: в заданный момент матча "
+        "(прематч или игровая минута) проверяет линию тотала и кф и, если они в "
+        "диапазонах, шлёт сигнал ТБ/ТМ — с учётом графика работы и дней недели правила.\n"
         "⚠️ Сбор данных должен быть запущен (сборщик шорт-хоккея — общий с 1X2)."
     )
 
@@ -1584,12 +1618,17 @@ def shtadd_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def shtrule_kb(rule_id: int, enabled: bool) -> InlineKeyboardMarkup:
-    toggle = ("🚫 Выключить" if enabled else "✅ Включить")
+def shtrule_kb(rule: dict) -> InlineKeyboardMarkup:
+    rid = rule["id"]
+    toggle = ("🚫 Выключить" if rule["enabled"] else "✅ Включить")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(toggle, callback_data=f"shttgl:{rule_id}")],
-        [InlineKeyboardButton("✏️ Изменить параметры", callback_data=f"shtedit:{rule_id}")],
-        [InlineKeyboardButton("🗑 Удалить правило", callback_data=f"shtdel_ask:{rule_id}")],
+        [InlineKeyboardButton(toggle, callback_data=f"shttgl:{rid}")],
+        [InlineKeyboardButton("✏️ Изменить параметры", callback_data=f"shtedit:{rid}")],
+        [InlineKeyboardButton(f"⏰ Время работы: {signals.fmt_rule_windows(rule)}",
+                              callback_data=f"shtsched:{rid}")],
+        [InlineKeyboardButton(f"📅 Дни: {signals.fmt_rule_weekdays(rule)}",
+                              callback_data=f"shtdays:{rid}")],
+        [InlineKeyboardButton("🗑 Удалить правило", callback_data=f"shtdel_ask:{rid}")],
         [InlineKeyboardButton("⬅️ К правилам", callback_data="shtrules")],
     ])
 
@@ -1600,9 +1639,12 @@ def shtrule_text(rule: dict) -> str:
         f"🏒 <b>{sh_short_league(rule['sport_name'])}</b>",
         f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
         "",
-        f"⏱ Минута сигнала: <b>{rule['minute']}</b>",
+        f"⏱ Момент сигнала: <b>{sh_total_signals.time_label(rule['minute'])}</b>",
         f"🎯 Ставка: <b>{sh_total_signals.side_label(rule['side'])}</b>",
         f"📐 Диапазон линии: <b>{sh_total_signals.fmt_range(rule['line_min'], rule['line_max'])}</b>",
+        f"💰 Диапазон кф: <b>{_sht_odds_label(rule)}</b>",
+        f"⏰ Время работы: <b>{signals.fmt_rule_windows(rule)}</b>",
+        f"📅 Дни недели: <b>{signals.fmt_rule_weekdays(rule)}</b>",
         "",
         "<b>Статистика</b>",
         f"Сигналов: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
@@ -1628,6 +1670,33 @@ def confirm_shtreset_kb() -> InlineKeyboardMarkup:
     ]])
 
 
+def shtdays_kb(rule: dict) -> InlineKeyboardMarkup:
+    """Экран выбора дней недели правила тоталов (индекс 0=Пн … 6=Вс)."""
+    rid = rule["id"]
+    sel = signals.parse_weekdays(rule.get("weekdays"))
+    rows, row = [], []
+    for i, name in enumerate(signals.WEEKDAYS_RU):
+        mark = "✅" if (not sel or len(sel) == 7 or i in sel) else "⬜"
+        row.append(InlineKeyboardButton(f"{mark} {name}", callback_data=f"shtday:{rid}:{i}"))
+        if len(row) == 4:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("📅 Все дни", callback_data=f"shtdayall:{rid}")])
+    rows.append([InlineKeyboardButton("⬅️ К правилу", callback_data=f"shtrule:{rid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def shtdays_text(rule: dict) -> str:
+    return (
+        f"📅 <b>Дни недели правила · {sh_short_league(rule['sport_name'])} · "
+        f"{sh_total_signals.time_label(rule['minute'])}</b>\n"
+        f"Сейчас: <b>{signals.fmt_rule_weekdays(rule)}</b>\n\n"
+        "Тап по дню — вкл/выкл. Правило работает только в отмеченные дни "
+        "(все отмечены или ни одного = работает все дни)."
+    )
+
+
 def shtstats_text() -> str:
     rules = database.sh_total_get_rules()
     lines = ["📊 <b>Статистика стратегии тоталов</b>", ""]
@@ -1637,8 +1706,8 @@ def shtstats_text() -> str:
     for r in rules:
         st = database.sh_total_rule_stats(r["id"])
         lines.append(f"🏒 <b>{sh_short_league(r['sport_name'])}</b> "
-                     f"(мин {r['minute']} · {sh_total_signals.side_label(r['side'])} · "
-                     f"{sh_total_signals.fmt_range(r['line_min'], r['line_max'])})")
+                     f"({sh_total_signals.time_label(r['minute'])} · {sh_total_signals.side_label(r['side'])} · "
+                     f"{sh_total_signals.fmt_range(r['line_min'], r['line_max'])} · кф {_sht_odds_label(r)})")
         extra = ""
         if st['wins'] + st['losses']:
             extra = f" · WR {st['winrate']:.0f}% · {money(st['profit'])}"
@@ -1998,18 +2067,26 @@ def pmstrat_text() -> str:
     )
 
 
+def prime_rule_nos() -> dict:
+    """{rule_id: сквозной № набора} — единая нумерация по всем наборам Prime
+    (порядок prime_db.get_rules(), ORDER BY id). Один и тот же № в списке наборов
+    и в статистике, чтобы строку статистики можно было сопоставить с набором."""
+    return {r["id"]: i for i, r in enumerate(prime_db.get_rules(), 1)}
+
+
 def pmrules_kb() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(pm_rule_label(r), callback_data=f"pmrule:{r['id']}")]
-            for r in prime_db.get_rules()]
+    rows = [[InlineKeyboardButton(pm_rule_label(r, i), callback_data=f"pmrule:{r['id']}")]
+            for i, r in enumerate(prime_db.get_rules(), 1)]
     rows.append([InlineKeyboardButton("➕ Добавить набор", callback_data="pmadd")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="pmstrat")])
     return InlineKeyboardMarkup(rows)
 
 
-def pm_rule_label(rule: dict) -> str:
+def pm_rule_label(rule: dict, num: int | None = None) -> str:
     mark = "✅" if rule["enabled"] else "🚫"
     chat = "" if rule["chat_id"] is not None else " 🔕"
-    return (f"{mark} {prime_signals.market_label(rule['market'])} · мин {rule['minute']} · "
+    prefix = f"№{num} " if num is not None else ""
+    return (f"{prefix}{mark} {prime_signals.market_label(rule['market'])} · мин {rule['minute']} · "
             f"пар {prime_db.count_pairs(rule['id'])}{chat}")
 
 
@@ -2055,8 +2132,9 @@ def pmrule_text(rule: dict) -> str:
     # Статистика — ГИПОТЕТИЧЕСКИ по сборщику (prime_markets.db) по условиям набора.
     st = prime_db.rule_stats_from_collector(rule)
     chat = f"<code>{rule['chat_id']}</code>" if rule["chat_id"] is not None else "❗️ не задан"
+    no = prime_rule_nos().get(rule["id"], "?")
     lines = [
-        f"🏀 <b>Набор · {prime_signals.market_label(rule['market'])}</b>",
+        f"🏀 <b>Набор №{no} · {prime_signals.market_label(rule['market'])}</b>",
         f"{'✅ включено' if rule['enabled'] else '🚫 выключено'}",
         "",
         f"⏱ Минута сигнала: <b>{rule['minute']}</b>",
@@ -4528,9 +4606,12 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             f"🏒 <b>{name}</b>\n\n"
             "Пришли параметры <b>одной строкой</b>:\n"
-            "<code>минута сторона линия_от линия_до</code>\n\n"
-            "Сторона: <code>ТБ</code> (тотал больше) или <code>ТМ</code> (тотал меньше).\n"
-            "Пример: <code>15 ТБ 8.5 12.5</code>\nОтмена — /start",
+            "<code>минута сторона линия_от линия_до [кф_от кф_до]</code>\n\n"
+            "• Минута: число или <code>прематч</code> (сигнал до старта матча).\n"
+            "• Сторона: <code>ТБ</code> (тотал больше) или <code>ТМ</code> (тотал меньше).\n"
+            "• Диапазон кф — необязателен (без него любой кф).\n"
+            "Примеры: <code>15 ТБ 8.5 12.5</code> · <code>прематч ТМ 9.5 11.5 1.8 2.3</code>\n"
+            "Отмена — /start",
             parse_mode="HTML")
 
     elif data.startswith("shtrule:"):
@@ -4544,7 +4625,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         ctx.user_data.pop("await", None)
         await q.edit_message_text(shtrule_text(rule), parse_mode="HTML",
-                                  reply_markup=shtrule_kb(rid, bool(rule["enabled"])))
+                                  reply_markup=shtrule_kb(rule))
 
     elif data.startswith("shttgl:"):
         try:
@@ -4557,7 +4638,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(shtrules_text(), parse_mode="HTML", reply_markup=shtrules_kb())
             return
         await q.edit_message_text(shtrule_text(rule), parse_mode="HTML",
-                                  reply_markup=shtrule_kb(rid, bool(rule["enabled"])))
+                                  reply_markup=shtrule_kb(rule))
 
     elif data.startswith("shtedit:"):
         try:
@@ -4570,12 +4651,75 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["await"] = ("shtrule_edit", rid)
         await q.edit_message_text(
             f"✏️ <b>Изменить · {sh_short_league(rule['sport_name'])}</b>\n"
-            f"Сейчас: мин {rule['minute']} · {sh_total_signals.side_label(rule['side'])} · "
-            f"{sh_total_signals.fmt_range(rule['line_min'], rule['line_max'])}\n\n"
+            f"Сейчас: {sh_total_signals.time_label(rule['minute'])} · "
+            f"{sh_total_signals.side_label(rule['side'])} · "
+            f"{sh_total_signals.fmt_range(rule['line_min'], rule['line_max'])} · "
+            f"кф {_sht_odds_label(rule)}\n\n"
             "Пришли новые параметры одной строкой:\n"
-            "<code>минута сторона линия_от линия_до</code>\n"
-            "Пример: <code>20 ТМ 9.5 11.5</code>\nОтмена — /start",
+            "<code>минута сторона линия_от линия_до [кф_от кф_до]</code>\n"
+            "Минута — число или <code>прематч</code>. Диапазон кф необязателен.\n"
+            "Примеры: <code>20 ТМ 9.5 11.5</code> · <code>прематч ТБ 8.5 12.5 1.7 2.2</code>\n"
+            "Отмена — /start",
             parse_mode="HTML")
+
+    elif data.startswith("shtsched:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.sh_total_get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("sht_rule_sched", rid)
+        await q.edit_message_text(
+            f"⏰ <b>Время работы правила · {sh_short_league(rule['sport_name'])} · "
+            f"{sh_total_signals.time_label(rule['minute'])}</b> (МСК)\n"
+            f"Сейчас: <b>{signals.fmt_rule_windows(rule)}</b>\n\n"
+            "Пришли одно или несколько окон через запятую:\n"
+            "<code>10:00-12:00, 16:00-18:00, 20:00-22:00</code>\n"
+            "или <code>off</code> — круглосуточно.\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("shtdays:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = database.sh_total_get_rule(rid)
+        if not rule:
+            return
+        await q.edit_message_text(shtdays_text(rule), parse_mode="HTML",
+                                  reply_markup=shtdays_kb(rule))
+
+    elif data.startswith("shtday:"):
+        try:
+            _, srid, sidx = data.split(":", 2)
+            rid, idx = int(srid), int(sidx)
+        except ValueError:
+            return
+        rule = database.sh_total_get_rule(rid)
+        if not rule or not (0 <= idx <= 6):
+            return
+        sel = signals.parse_weekdays(rule.get("weekdays"))
+        if not sel:                       # пусто = все дни → старт от полного набора
+            sel = set(range(7))
+        sel ^= {idx}                      # переключаем день
+        new = None if (not sel or len(sel) == 7) else ",".join(str(i) for i in sorted(sel))
+        database.sh_total_update_rule_weekdays(rid, new)
+        rule = database.sh_total_get_rule(rid)
+        await q.edit_message_text(shtdays_text(rule), parse_mode="HTML",
+                                  reply_markup=shtdays_kb(rule))
+
+    elif data.startswith("shtdayall:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not database.sh_total_get_rule(rid):
+            return
+        database.sh_total_update_rule_weekdays(rid, None)   # все дни
+        rule = database.sh_total_get_rule(rid)
+        await q.edit_message_text(shtdays_text(rule), parse_mode="HTML",
+                                  reply_markup=shtdays_kb(rule))
 
     elif data.startswith("shtdel_ask:"):
         try:
@@ -6755,42 +6899,65 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"✅ Стратегия тоталов → chat_id <code>{cid}</code>.",
             parse_mode="HTML", reply_markup=shtstrat_kb())
 
+    elif kind == "sht_rule_sched":
+        rid = code                                   # code здесь = id правила
+        if not database.sh_total_get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        value, ok = parse_windows_input(raw)
+        if not ok:
+            await update.message.reply_text(
+                "❌ Формат: <code>10:00-12:00, 16:00-18:00</code> или <code>off</code>.",
+                parse_mode="HTML")
+            return
+        database.sh_total_update_rule_windows(rid, value)
+        ctx.user_data.pop("await", None)
+        rule = database.sh_total_get_rule(rid)
+        await update.message.reply_text(
+            f"✅ Время работы правила → {signals.fmt_rule_windows(rule)}.\n\n" + shtrule_text(rule),
+            parse_mode="HTML", reply_markup=shtrule_kb(rule))
+
     elif kind == "shtrule_new":
         parsed = parse_sh_total_rule_input(raw)
         if not parsed:
             await update.message.reply_text(
-                "❌ Формат: <code>минута сторона линия_от линия_до</code>, например "
-                "<code>15 ТБ 8.5 12.5</code>. Ещё раз или /start.", parse_mode="HTML")
+                "❌ Формат: <code>минута сторона линия_от линия_до [кф_от кф_до]</code>, "
+                "например <code>15 ТБ 8.5 12.5</code> или <code>прематч ТМ 9.5 11.5 1.8 2.3</code>. "
+                "Ещё раз или /start.", parse_mode="HTML")
             return
         idx = code                                   # code здесь = индекс лиги
-        minute, side, line_min, line_max = parsed
+        minute, side, line_min, line_max, odds_min, odds_max = parsed
         if not (0 <= idx < len(SH_STRAT_LEAGUES)):
             ctx.user_data.pop("await", None)
             return
-        database.sh_total_add_rule(SH_STRAT_LEAGUES[idx], minute, side, line_min, line_max)
+        database.sh_total_add_rule(SH_STRAT_LEAGUES[idx], minute, side,
+                                   line_min, line_max, odds_min, odds_max)
         ctx.user_data.pop("await", None)
+        kf = _sht_odds_label({"odds_min": odds_min, "odds_max": odds_max})
         await update.message.reply_text(
             f"✅ Правило добавлено:\n<b>{sh_short_league(SH_STRAT_LEAGUES[idx])}</b> · "
-            f"мин {minute} · {sh_total_signals.side_label(side)} · "
-            f"{sh_total_signals.fmt_range(line_min, line_max)}",
+            f"{sh_total_signals.time_label(minute)} · {sh_total_signals.side_label(side)} · "
+            f"{sh_total_signals.fmt_range(line_min, line_max)} · кф {kf}",
             parse_mode="HTML", reply_markup=shtrules_kb())
 
     elif kind == "shtrule_edit":
         parsed = parse_sh_total_rule_input(raw)
         if not parsed:
             await update.message.reply_text(
-                "❌ Формат: <code>минута сторона линия_от линия_до</code>, например "
-                "<code>15 ТБ 8.5 12.5</code>. Ещё раз или /start.", parse_mode="HTML")
+                "❌ Формат: <code>минута сторона линия_от линия_до [кф_от кф_до]</code>, "
+                "например <code>15 ТБ 8.5 12.5</code> или <code>прематч ТМ 9.5 11.5 1.8 2.3</code>. "
+                "Ещё раз или /start.", parse_mode="HTML")
             return
         rid = code                                   # code здесь = id правила
-        minute, side, line_min, line_max = parsed
-        database.sh_total_update_rule(rid, minute, side, line_min, line_max)
+        minute, side, line_min, line_max, odds_min, odds_max = parsed
+        database.sh_total_update_rule(rid, minute, side, line_min, line_max,
+                                      odds_min, odds_max)
         ctx.user_data.pop("await", None)
         rule = database.sh_total_get_rule(rid)
         if rule:
             await update.message.reply_text(
                 "✅ Правило изменено.\n\n" + shtrule_text(rule), parse_mode="HTML",
-                reply_markup=shtrule_kb(rid, bool(rule["enabled"])))
+                reply_markup=shtrule_kb(rule))
         else:
             await update.message.reply_text("✅ Готово.", reply_markup=shtrules_kb())
 
