@@ -51,6 +51,10 @@ import export_prime_women
 import pro_strat_db
 import pro_strat_signals
 import export_pro_strat
+import auts_db
+import auts_signals
+import export_auts
+from auts_config import AUTS_STRAT_CODE
 from config import (BOT_TOKEN, STRATEGIES, BANKROLL_START, ADMIN_IDS, LEAGUES,
                     COLLECTOR_LEAGUES, PERIOD_COLLECTOR_LEAGUES,
                     SH_STRAT_CODE, SH_STRAT_LEAGUES, SH_TOTAL_STRAT_CODE,
@@ -69,12 +73,14 @@ SH_LOG_FILE = DIR / "sh_parser.log"
 CYBER_LOG_FILE = DIR / "cyber_parser.log"
 NHL_LOG_FILE = DIR / "nhl_parser.log"
 CAGE_LOG_FILE = DIR / "cage_parser.log"
+AUTS_LOG_FILE = DIR / "auts_parser.log"
 MSK = timezone(timedelta(hours=3))
 _proc: subprocess.Popen | None = None
 _sh_proc: subprocess.Popen | None = None
 _cyber_proc: subprocess.Popen | None = None
 _nhl_proc: subprocess.Popen | None = None
 _cage_proc: subprocess.Popen | None = None
+_auts_proc: subprocess.Popen | None = None
 
 # Веб-панель fonbet-dashboard (on-demand systemd-сервис на этом же VPS)
 PANEL_SERVICE = "fonbet-dashboard"
@@ -245,6 +251,38 @@ def stop_cage_parser():
     subprocess.run(["pkill", "-f", "cage_parser.py"], capture_output=True)
 
 
+def auts_parser_running() -> bool:
+    if _auts_proc is not None and _auts_proc.poll() is None:
+        return True
+    try:
+        r = subprocess.run(["pgrep", "-f", "auts_parser.py"], capture_output=True, timeout=2)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def start_auts_parser():
+    """Запускает auts_parser.py (стратегия аутов) subprocess'ом, если не запущен."""
+    global _auts_proc
+    if auts_parser_running():
+        return
+    f = open(AUTS_LOG_FILE, "a")
+    _auts_proc = subprocess.Popen([sys.executable, "-u", str(DIR / "auts_parser.py")],
+                                  cwd=str(DIR), stdout=f, stderr=subprocess.STDOUT)
+
+
+def stop_auts_parser():
+    global _auts_proc
+    if _auts_proc and _auts_proc.poll() is None:
+        _auts_proc.terminate()
+        try:
+            _auts_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _auts_proc.kill()
+        _auts_proc = None
+    subprocess.run(["pkill", "-f", "auts_parser.py"], capture_output=True)
+
+
 def panel_running() -> bool:
     """Запущен ли systemd-сервис веб-панели."""
     try:
@@ -334,12 +372,101 @@ def strats_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏀 Стратегия CAGE", callback_data="csstrat")],
         [InlineKeyboardButton("🏀 Стратегия Prime Ж", callback_data="pwstrat")],
         [InlineKeyboardButton("🏀 Стратегия Pro М", callback_data="prostrat")],
+        [InlineKeyboardButton("⚽ Стратегия Ауты", callback_data="autstrat")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="back")],
     ])
 
 
 def strats_text() -> str:
     return "🎯 <b>Стратегии</b>\nВыбери стратегию для настройки и статистики:"
+
+
+# --- хаб «Стратегия Ауты» (вброс аутов, футбол, прематч) -------------------
+
+def autstrat_kb() -> InlineKeyboardMarkup:
+    on = auts_db.is_enabled()
+    toggle = (InlineKeyboardButton("⏸ Выключить стратегию", callback_data="auts_toggle")
+              if on else InlineKeyboardButton("▶️ Включить стратегию", callback_data="auts_toggle"))
+    proc = (InlineKeyboardButton("⏹ Остановить парсер", callback_data="auts_pstop")
+            if auts_parser_running() else
+            InlineKeyboardButton("🟢 Запустить парсер", callback_data="auts_pstart"))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚙️ Чат рассылки", callback_data="autschat")],
+        [toggle],
+        [InlineKeyboardButton("🚫 Блэклист лиг", callback_data="autsbl")],
+        [InlineKeyboardButton("📊 Статистика", callback_data="autsstats")],
+        [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="autsx")],
+        [proc],
+        [InlineKeyboardButton("⬅️ К стратегиям", callback_data="strats")],
+    ])
+
+
+def autstrat_text() -> str:
+    chat = database.get_chat_id(AUTS_STRAT_CODE)
+    on = auts_db.is_enabled()
+    bl = auts_db.get_blacklist()
+    lines = [
+        "⚽ <b>Стратегия Ауты</b> (вброс аутов)",
+        "",
+        "Футбол, прематч. Условие: <b>ничья ≥ 4.0</b> И <b>ТБ 2.5 ≤ 1.9</b>. Как только "
+        "у матча открывается рынок тотала аутов — сигнал <b>ТМ аутов</b> по линии с "
+        "наибольшим кф в окне 1.90–2.10.",
+        "",
+        f"Состояние: {'🟢 включена' if on else '🔴 выключена'}",
+        f"Парсер: {'🟢 работает' if auts_parser_running() else '🔴 остановлен'}",
+        f"Чат рассылки: {'<code>'+str(chat)+'</code>' if chat is not None else '❌ не задан'}",
+        f"Блэклист лиг: {len(bl)}",
+        f"Ждут дорасчёта: {auts_db.pending_count()}",
+    ]
+    return "\n".join(lines)
+
+
+def autsbl_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for i, tok in enumerate(auts_db.get_blacklist()):
+        rows.append([InlineKeyboardButton(f"❌ {tok[:40]}", callback_data=f"autsbl_del:{i}")])
+    rows.append([InlineKeyboardButton("➕ Добавить лигу", callback_data="autsbl_add")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="autstrat")])
+    return InlineKeyboardMarkup(rows)
+
+
+def autsbl_text() -> str:
+    bl = auts_db.get_blacklist()
+    body = "\n".join(f"• <code>{t}</code>" for t in bl) or "— пусто —"
+    return ("🚫 <b>Блэклист лиг стратегии Ауты</b>\n"
+            "Матчи лиг, чьё название содержит подстроку, пропускаются.\n\n" + body)
+
+
+def _auts_stats_block(title: str, st: dict) -> str:
+    if st["count"] == 0:
+        return f"<b>{title}:</b> —"
+    return (f"<b>{title}:</b> {st['count']} сигн · "
+            f"✅{st['wins']} ✖️{st['losses']}"
+            + (f" ↩️{st['push']}" if st['push'] else "")
+            + f" · WR {st['winrate']:.0f}% · ROI {st['roi']:+.0f}% · {money(st['profit'])}")
+
+
+def autsstats_text() -> str:
+    now = datetime.now(MSK)
+    day0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week0 = day0 - timedelta(days=now.weekday())
+    month0 = day0.replace(day=1)
+    f = lambda d: d.strftime("%Y-%m-%d %H:%M:%S")
+    far = "2999-01-01 00:00:00"
+    st_day = auts_db.stats_between(f(day0), far)
+    st_week = auts_db.stats_between(f(week0), far)
+    st_month = auts_db.stats_between(f(month0), far)
+    st_all = auts_db.stats_between("0000-01-01", far)
+    lines = [
+        "📊 <b>Статистика · Ауты</b>",
+        _auts_stats_block("Сегодня", st_day),
+        _auts_stats_block("Неделя", st_week),
+        _auts_stats_block("Месяц", st_month),
+        _auts_stats_block("Всего", st_all),
+        "",
+        f"Ждут дорасчёта: {auts_db.pending_count()}",
+    ]
+    return "\n".join(lines)
 
 
 # --- хаб «Сборщики»: все сборщики в одном месте ----------------------------
@@ -6766,6 +6893,74 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ Сигналы стратегии Четверти Pro Ж очищены.\n\n" + pqstrat_text(),
                                   parse_mode="HTML", reply_markup=pqstrat_kb())
 
+    elif data == "autstrat":
+        await q.edit_message_text(autstrat_text(), parse_mode="HTML", reply_markup=autstrat_kb())
+
+    elif data == "autschat":
+        ctx.user_data["await"] = ("autschat", AUTS_STRAT_CODE)
+        await q.edit_message_text(
+            "⚙️ <b>Чат рассылки стратегии Ауты</b>\n"
+            "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
+            "Отмена — /start", parse_mode="HTML")
+
+    elif data == "auts_toggle":
+        auts_db.set_enabled(not auts_db.is_enabled())
+        await q.edit_message_text(autstrat_text(), parse_mode="HTML", reply_markup=autstrat_kb())
+
+    elif data == "auts_pstart":
+        start_auts_parser()
+        await q.edit_message_text("🟢 Парсер аутов запущен.\n\n" + autstrat_text(),
+                                  parse_mode="HTML", reply_markup=autstrat_kb())
+
+    elif data == "auts_pstop":
+        stop_auts_parser()
+        await q.edit_message_text("⏹ Парсер аутов остановлен.\n\n" + autstrat_text(),
+                                  parse_mode="HTML", reply_markup=autstrat_kb())
+
+    elif data == "autsbl":
+        await q.edit_message_text(autsbl_text(), parse_mode="HTML", reply_markup=autsbl_kb())
+
+    elif data == "autsbl_add":
+        ctx.user_data["await"] = ("autsbl_add", "")
+        await q.edit_message_text(
+            "➕ <b>Добавить лигу в блэклист</b>\n"
+            "Пришли подстроку названия лиги, например <code>Германия. Бундеслига. Сезон</code> "
+            "или просто <code>Бундеслига</code>.\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("autsbl_del:"):
+        idx = int(data.split(":", 1)[1])
+        bl = auts_db.get_blacklist()
+        if 0 <= idx < len(bl):
+            auts_db.remove_blacklist(bl[idx])
+        await q.edit_message_text(autsbl_text(), parse_mode="HTML", reply_markup=autsbl_kb())
+
+    elif data == "autsstats":
+        await q.edit_message_text(autsstats_text(), parse_mode="HTML", reply_markup=autstrat_kb())
+
+    elif data == "autsx":
+        await q.edit_message_text("⏳ Генерирую Excel стратегии Ауты…", parse_mode="HTML")
+        ts = datetime.now(MSK).strftime("%Y%m%d_%H%M%S")
+        path = DIR / f"auts_signals_{ts}.xlsx"
+        try:
+            n = export_auts.build(str(path))
+            if n == 0:
+                await ctx.bot.send_message(q.message.chat_id,
+                                           "📊 Сигналов стратегии Ауты пока нет — нечего выгружать.")
+            else:
+                with open(path, "rb") as fp:
+                    await ctx.bot.send_document(
+                        chat_id=q.message.chat_id, document=fp, filename=path.name,
+                        caption=f"📊 Ауты · сигналов {n}")
+        except Exception as e:
+            await ctx.bot.send_message(q.message.chat_id, f"❌ Ошибка экспорта: {e}")
+        finally:
+            try:
+                path.unlink()
+            except Exception:
+                pass
+        await ctx.bot.send_message(q.message.chat_id, autstrat_text(),
+                                   parse_mode="HTML", reply_markup=autstrat_kb())
+
     elif data == "back":
         ctx.user_data.pop("await", None)
         ctx.user_data.pop("pm_view", None)
@@ -6794,6 +6989,28 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ {STRATEGIES.get(code, code)} → chat_id <code>{cid}</code>.",
             parse_mode="HTML", reply_markup=main_kb())
+
+    elif kind == "autschat":
+        try:
+            cid = int(raw)
+        except ValueError:
+            await update.message.reply_text("❌ chat_id должен быть числом. Ещё раз или /start.")
+            return
+        database.set_chat_id(AUTS_STRAT_CODE, cid)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ Стратегия Ауты → chat_id <code>{cid}</code>.",
+            parse_mode="HTML", reply_markup=autstrat_kb())
+
+    elif kind == "autsbl_add":
+        if not raw:
+            await update.message.reply_text("❌ Пустая строка. Пришли подстроку названия лиги или /start.")
+            return
+        auts_db.add_blacklist(raw)
+        ctx.user_data.pop("await", None)
+        await update.message.reply_text(
+            f"✅ В блэклист добавлено: <code>{raw}</code>.",
+            parse_mode="HTML", reply_markup=autsbl_kb())
 
     elif kind == "lthr":
         try:
@@ -7480,6 +7697,7 @@ def main():
     cage_strat_db.init_db()
     prime_women_db.init_db()
     pro_strat_db.init_db()
+    auts_db.init_db()
     # Миграция ОДНОКРАТНО: стратегия IPBL переехала на НАБОРЫ. Если наборов ещё нет —
     # создаём один стартовый из текущих настроек: чат signal_tm, запасы по дивизионам
     # из league_config (get_league_threshold), окна работы signal_tm. Белый список
@@ -7532,6 +7750,7 @@ def main():
     subprocess.run(["pkill", "-9", "-f", "cyber_parser.py"], capture_output=True)
     subprocess.run(["pkill", "-9", "-f", "nhl_parser.py"], capture_output=True)
     subprocess.run(["pkill", "-9", "-f", "cage_parser.py"], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", "auts_parser.py"], capture_output=True)
     time.sleep(1.5)
     # Автозапуск парсеров при старте бота (в т.ч. после рестарта сервиса).
     start_parser()
@@ -7539,6 +7758,7 @@ def main():
     start_cyber_parser()
     start_nhl_parser()
     start_cage_parser()
+    start_auts_parser()
     request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0,
                            write_timeout=30.0, pool_timeout=30.0)
     app = (Application.builder().token(BOT_TOKEN).request(request)
