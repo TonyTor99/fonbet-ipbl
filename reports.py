@@ -22,6 +22,7 @@ import pq_db
 import cage_strat_db
 import prime_women_db
 import pro_strat_db
+import auts_db
 from config import BANKROLL_START
 
 MSK = timezone(timedelta(hours=3))
@@ -451,6 +452,52 @@ def build_pro_monthly_text(now: datetime | None = None) -> str:
     total = pro_strat_db.profit_total(start.isoformat(), end.isoformat())
     return "\n".join([
         PRO_HEADER,
+        GREETING,
+        f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+# ===========================================================================
+# Отчёты стратегии АУТОВ (отдельный источник — auts_db). День/нед/мес, %% от банка.
+# ===========================================================================
+AUTS_HEADER = "Стратегия Ауты"
+
+
+def build_auts_daily_text(now: datetime | None = None, day: date | None = None) -> str:
+    now = now or datetime.now(MSK)
+    day = day or (now.date() - timedelta(days=1))
+    total = auts_db.profit_total(day.isoformat(), day.isoformat())
+    cnt = auts_db.daily_counts(day.isoformat())
+    return "\n".join([
+        AUTS_HEADER,
+        GREETING,
+        _counts_line(cnt),
+        f"За {day.strftime('%d.%m')} прибыль составила {_pct(total):.2f}%",
+    ])
+
+
+def build_auts_weekly_text(now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_week_range(now.date())
+    by_day = auts_db.profit_by_day(start.isoformat(), end.isoformat())
+    total = auts_db.profit_total(start.isoformat(), end.isoformat())
+    lines = [
+        AUTS_HEADER,
+        GREETING,
+        f"За прошедшую неделю прибыль составила {_pct(total):.2f}%",
+    ]
+    for i in range(7):
+        d = start + timedelta(days=i)
+        lines.append(_day_line(d, by_day.get(d.isoformat(), 0.0)))
+    return "\n".join(lines)
+
+
+def build_auts_monthly_text(now: datetime | None = None) -> str:
+    now = now or datetime.now(MSK)
+    start, end = last_month_range(now.date())
+    total = auts_db.profit_total(start.isoformat(), end.isoformat())
+    return "\n".join([
+        AUTS_HEADER,
         GREETING,
         f"За прошедший месяц прибыль составила {_pct(total):.2f}%",
     ])

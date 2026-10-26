@@ -21,6 +21,10 @@ from datetime import datetime, timezone, timedelta
 import auts_db
 import tg_notify
 import database
+try:                              # VK — только на сервере Данила (ветка vk-171)
+    import vk_notify
+except Exception:
+    vk_notify = None
 from auts_config import (
     FOOTBALL_ROOT_SPORT_ID, AUT_EVENT_NAME, DRAW_FID,
     TOTAL_B_FIDS, TOTAL_M_FIDS, GOALS_TOTAL_LINE,
@@ -38,6 +42,19 @@ FINISH_GRACE_SEC = 3 * 3600 + 1800        # 3.5 ч
 
 def _now() -> str:
     return datetime.now(MSK).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _vk_send(text_html: str):
+    """Дублировать первичный сигнал в VK-беседу стратегии (без правки итога).
+    No-op, если vk_notify недоступен (main) или peer/токен/выключатель не заданы."""
+    if vk_notify is None:
+        return
+    try:
+        peer = database.get_vk_peer(AUTS_STRAT_CODE)
+        if peer is not None:
+            vk_notify.send(peer, text_html)
+    except Exception as e:
+        log.warning("VK send err: %s", e)
 
 
 # --- дерево видов спорта / футбол -------------------------------------------
@@ -229,6 +246,7 @@ def process(data: dict):
                 mid = tg_notify.send(chat_id, render_signal(existing))
                 if mid is not None:
                     auts_db.mark_sent(existing["id"], chat_id, mid)
+                    _vk_send(render_signal(existing))
                     log.info("AUTS late-send ev=%s chat=%s", c["event_id"], chat_id)
             continue
         sig = dict(c)
@@ -237,6 +255,7 @@ def process(data: dict):
                    live_seen=0, profit=None, created_at=_now())
         if chat_id is not None:
             sig["message_id"] = tg_notify.send(chat_id, render_signal(sig))
+            _vk_send(render_signal(sig))
         sid = auts_db.insert_signal(sig)
         if sid is None:
             continue

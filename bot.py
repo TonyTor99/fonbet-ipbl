@@ -395,6 +395,7 @@ def autstrat_kb() -> InlineKeyboardMarkup:
         [toggle],
         [InlineKeyboardButton("🚫 Блэклист лиг", callback_data="autsbl")],
         [InlineKeyboardButton("📊 Статистика", callback_data="autsstats")],
+        [InlineKeyboardButton("📈 Отчёты", callback_data="autsreports")],
         [InlineKeyboardButton("📥 Выгрузить Excel", callback_data="autsx")],
         [proc],
         [InlineKeyboardButton("⬅️ К стратегиям", callback_data="strats")],
@@ -428,6 +429,26 @@ def autsbl_kb() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("➕ Добавить лигу", callback_data="autsbl_add")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="autstrat")])
     return InlineKeyboardMarkup(rows)
+
+
+def autsreports_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 День", callback_data="autsrep:day"),
+         InlineKeyboardButton("неделя", callback_data="autsrep:week"),
+         InlineKeyboardButton("месяц", callback_data="autsrep:month")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="autstrat")],
+    ])
+
+
+def autsreports_text() -> str:
+    return (
+        "📈 <b>Отчёты стратегии Ауты</b>\n\n"
+        "Процент прибыли — от банка "
+        f"{BANKROLL_START:,.0f}".replace(",", " ") + "₽.\n"
+        "• <b>Дневной</b> — авто ежедневно 09:00 МСК (за вчера).\n"
+        "• <b>Недельный</b> — авто в понедельник 09:00 МСК (Пн–Вс).\n"
+        "• <b>Месячный</b> — авто 1-го числа 09:00 МСК.\n\n"
+        "Кнопками ниже можно отправить отчёт вручную прямо сейчас.")
 
 
 def autsbl_text() -> str:
@@ -1019,6 +1040,18 @@ async def _send_pro_report(bot, text: str):
         return False, str(e)
 
 
+async def _send_auts_report(bot, text: str):
+    """Публикует отчёт стратегии Ауты в её чат. (ok, err_text)."""
+    cid = database.get_chat_id(AUTS_STRAT_CODE)
+    if cid is None:
+        return False, "chat_id Ауты не задан (задай в «⚽ Стратегия Ауты → Чат рассылки»)."
+    try:
+        await bot.send_message(chat_id=cid, text=text, disable_web_page_preview=True)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 # --- планировщик отчётов (без JobQueue: лёгкий asyncio-таск) ----------------
 # JobQueue у PTB требует extra [job-queue]; чтобы не тянуть зависимость на VPS,
 # проверяем время сами раз в минуту. Маркер уже отправленного периода лежит в БД
@@ -1224,6 +1257,30 @@ async def _report_scheduler(app):
                     if ok:
                         database.set_report_marker("pro_monthly", marker)
                         print(f"[REPORT] pro monthly sent for {marker}")
+            # Ауты: дневной каждый день, недельный (Пн), месячный (1-е) — 09:00 МСК.
+            if now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("auts_daily") != marker:
+                    ok, err = await _send_auts_report(app.bot, reports.build_auts_daily_text(now))
+                    if ok:
+                        database.set_report_marker("auts_daily", marker)
+                        print(f"[REPORT] auts daily sent for {marker}")
+                    else:
+                        print(f"[REPORT] auts daily NOT sent: {err}")
+            if now.weekday() == 0 and now.hour >= 9:
+                marker = now.strftime("%Y-%m-%d")
+                if database.get_report_marker("auts_weekly") != marker:
+                    ok, err = await _send_auts_report(app.bot, reports.build_auts_weekly_text(now))
+                    if ok:
+                        database.set_report_marker("auts_weekly", marker)
+                        print(f"[REPORT] auts weekly sent for {marker}")
+            if now.day == 1 and now.hour >= 9:
+                marker = now.strftime("%Y-%m")
+                if database.get_report_marker("auts_monthly") != marker:
+                    ok, err = await _send_auts_report(app.bot, reports.build_auts_monthly_text(now))
+                    if ok:
+                        database.set_report_marker("auts_monthly", marker)
+                        print(f"[REPORT] auts monthly sent for {marker}")
         except Exception as e:
             print(f"[REPORT sched error] {e}")
         await asyncio.sleep(60)
@@ -6936,6 +6993,24 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif data == "autsstats":
         await q.edit_message_text(autsstats_text(), parse_mode="HTML", reply_markup=autstrat_kb())
+
+    elif data == "autsreports":
+        await q.edit_message_text(autsreports_text(), parse_mode="HTML", reply_markup=autsreports_kb())
+
+    elif data.startswith("autsrep:"):
+        period = data.split(":", 1)[1]
+        if period == "day":
+            text, title = reports.build_auts_daily_text(), "Дневной"
+        elif period == "week":
+            text, title = reports.build_auts_weekly_text(), "Недельный"
+        else:
+            text, title = reports.build_auts_monthly_text(), "Месячный"
+        ok, err = await _send_auts_report(ctx.bot, text)
+        if ok:
+            head = f"✅ {title} отчёт Ауты отправлен. Текст:\n\n<code>{text}</code>"
+        else:
+            head = f"❌ Не отправлено: {err}\n\nТекст отчёта:\n\n<code>{text}</code>"
+        await q.edit_message_text(head, parse_mode="HTML", reply_markup=autsreports_kb())
 
     elif data == "autsx":
         await q.edit_message_text("⏳ Генерирую Excel стратегии Ауты…", parse_mode="HTML")

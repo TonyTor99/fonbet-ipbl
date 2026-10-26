@@ -245,3 +245,43 @@ def pending_count() -> int:
     n = conn.execute("SELECT COUNT(*) c FROM auts_sent WHERE status='sent' AND result IS NULL").fetchone()["c"]
     conn.close()
     return n
+
+
+# --- прибыль по датам (для отчётов reports.py) ------------------------------
+# Дата сигнала = первые 10 символов created_at (МСК, 'YYYY-MM-DD').
+
+def profit_total(start_iso: str, end_iso: str) -> float:
+    """Сумма прибыли по дорасчитанным сигналам за [start_iso, end_iso] (включительно)."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT COALESCE(SUM(profit),0) p FROM auts_sent "
+        "WHERE status='sent' AND result IS NOT NULL "
+        "AND substr(created_at,1,10) BETWEEN ? AND ?",
+        (start_iso, end_iso)).fetchone()
+    conn.close()
+    return float(row["p"] or 0.0)
+
+
+def profit_by_day(start_iso: str, end_iso: str) -> dict:
+    """{ 'YYYY-MM-DD': сумма прибыли } по дорасчитанным сигналам за период."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT substr(created_at,1,10) d, COALESCE(SUM(profit),0) p FROM auts_sent "
+        "WHERE status='sent' AND result IS NOT NULL "
+        "AND substr(created_at,1,10) BETWEEN ? AND ? GROUP BY d",
+        (start_iso, end_iso)).fetchall()
+    conn.close()
+    return {r["d"]: float(r["p"] or 0.0) for r in rows}
+
+
+def daily_counts(day_iso: str) -> dict:
+    """{wins, losses, pushes} за день (по дорасчитанным сигналам)."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT result, COUNT(*) c FROM auts_sent "
+        "WHERE status='sent' AND result IS NOT NULL AND substr(created_at,1,10)=? "
+        "GROUP BY result", (day_iso,)).fetchall()
+    conn.close()
+    m = {r["result"]: r["c"] for r in rows}
+    return {"wins": m.get("Выигрыш", 0), "losses": m.get("Проигрыш", 0),
+            "pushes": m.get("Возврат", 0)}
