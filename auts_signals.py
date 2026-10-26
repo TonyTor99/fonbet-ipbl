@@ -35,9 +35,12 @@ from auts_config import (
 log = logging.getLogger("auts_signals")
 MSK = timezone(timedelta(hours=3))
 
-# Матч считаем завершённым, если он пропал из фида и с его старта прошло столько сек
-# (футбол + перерыв + добавленное + запас). После этого дорасчёт по последнему счётчику.
-FINISH_GRACE_SEC = 3 * 3600 + 1800        # 3.5 ч
+# Детект финала. Если матч ПРОПАЛ из live-фида и его уже видели живым — он отыгран
+# (минимальная правдоподобная длительность ~1ч45м защищает от кратких провалов фида).
+MIN_MATCH_SEC = 6300                      # 1 ч 45 мин от старта
+# Страховка: если матч пропал, но живым не видели — дорасчёт по времени (мог быть
+# пропущен сбор live-счётчика); после этого резолв по последнему известному счётчику.
+FINISH_GRACE_SEC = 2 * 3600 + 1800        # 2.5 ч
 
 
 def _now() -> str:
@@ -267,13 +270,12 @@ def process(data: dict):
 # --- резолв -----------------------------------------------------------------
 
 def _aut_count(data: dict, child_id: int):
-    """Живой счётчик аутов из liveEventInfos дочернего события (сумма сторон)."""
-    for l in data.get("liveEventInfos", []):
-        if l.get("eventId") == child_id:
-            sc = l.get("scores") or []
+    """Живой счётчик аутов. Fonbet отдаёт его в eventMiscs ДОЧЕРНЕГО события
+    «вброс аутов» (score1/score2 = ауты команд). См. ref_fonbet_football_auts_api."""
+    for m in data.get("eventMiscs", []):
+        if m.get("id") == child_id:
             try:
-                cell = sc[0][0]
-                return int(cell.get("c1", 0)) + int(cell.get("c2", 0))
+                return int(m.get("score1", 0) or 0) + int(m.get("score2", 0) or 0)
             except Exception:
                 return None
     return None
@@ -319,6 +321,10 @@ def track(data: dict):
             if misc and (misc.get("finished") or "ИТОГ" in (misc.get("comment", "") or "").upper()):
                 _resolve(sig, sig.get("last_auts"))
         else:
-            # матч пропал из фида — если точно отыгран по времени, дорасчёт
-            if sig.get("start_time") and now > sig["start_time"] + FINISH_GRACE_SEC:
+            # матч пропал из live-фида. Если его видели живым и прошло минимальное
+            # время матча — он отыгран, дорасчёт по последнему счётчику аутов.
+            st = sig.get("start_time")
+            if st and sig.get("live_seen") and now > st + MIN_MATCH_SEC:
+                _resolve(sig, sig.get("last_auts"))
+            elif st and now > st + FINISH_GRACE_SEC:
                 _resolve(sig, sig.get("last_auts"))
