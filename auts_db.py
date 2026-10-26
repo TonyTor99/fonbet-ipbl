@@ -142,6 +142,22 @@ def signal_exists(event_id: int) -> bool:
     return row is not None
 
 
+def get_by_event(event_id: int):
+    conn = _conn()
+    row = conn.execute("SELECT * FROM auts_sent WHERE event_id=?", (event_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def mark_sent(sig_id: int, chat_id: int, message_id: int):
+    """Проставить чат/message_id уже записанному, но ещё не отправленному сигналу."""
+    conn = _conn()
+    conn.execute("UPDATE auts_sent SET chat_id=?, message_id=? WHERE id=?",
+                 (chat_id, message_id, sig_id))
+    conn.commit()
+    conn.close()
+
+
 def insert_signal(sig: dict):
     conn = _conn()
     try:

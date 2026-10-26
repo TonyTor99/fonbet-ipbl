@@ -220,7 +220,16 @@ def process(data: dict):
         return
     chat_id = database.get_chat_id(AUTS_STRAT_CODE)
     for c in cands:
-        if auts_db.signal_exists(c["event_id"]):
+        existing = auts_db.get_by_event(c["event_id"])
+        if existing is not None:
+            # Сигнал уже записан. Если он ещё НЕ отправлен (чата не было в момент
+            # записи), а теперь чат появился и матч всё ещё прематч — досылаем.
+            if (existing.get("message_id") is None and existing.get("status") == "sent"
+                    and chat_id is not None):
+                mid = tg_notify.send(chat_id, render_signal(existing))
+                if mid is not None:
+                    auts_db.mark_sent(existing["id"], chat_id, mid)
+                    log.info("AUTS late-send ev=%s chat=%s", c["event_id"], chat_id)
             continue
         sig = dict(c)
         sig.update(chat_id=chat_id, message_id=None, status="sent",
