@@ -834,8 +834,10 @@ def _prime_market_block(market: str) -> list[str]:
     for r in rules:
         st = prime_db.rule_stats(r["id"])
         cmark = "" if r["chat_id"] is not None else " 🔕"
+        pairs = "все пары" if r.get("all_pairs") else f"пар {prime_db.count_pairs(r['id'])}"
+        pace = f" · темп≤{prime_signals.fmt_pace(r['zapas'])}" if r.get("zapas") is not None else ""
         lines += ["", f"• <b>№{nos.get(r['id'], '?')}</b> · мин {r['minute']} · "
-                  f"пар {prime_db.count_pairs(r['id'])}{cmark}: "
+                  f"{pairs}{pace}{cmark}: "
                   f"сигналов {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
                   f"↩️ {st['pushes']} | ⏸️ {st['no_result']}"]
         if st["wins"] + st["losses"] > 0:
@@ -2244,9 +2246,10 @@ def pmstrat_text() -> str:
         f"Парсер: {'🟢 работает' if parser_running() else '🔴 остановлен'}\n"
         f"Наборов: {len(rules)} (включено {on})\n\n"
         "Набор = рынок + минута + <b>свой чат</b> + <b>свой график по часам</b> + "
-        "<b>свои дни недели</b> + галочки пар. На заданной игровой минуте матча Prime "
-        "муж по отмеченной паре (в свой график/дни) шлётся сигнал по текущей крайней "
-        "линии рынка в чат набора."
+        "<b>свои дни недели</b> + галочки пар (или «все пары»). На заданной игровой минуте "
+        "матча Prime муж по отмеченной паре (в свой график/дни) шлётся сигнал по текущей "
+        "крайней линии рынка в чат набора. Доп. условия: <b>темп</b> (счёт ÷ минуту × 48 − "
+        "линия ≤ порог) и <b>один сигнал на матч</b> в чат."
         f"{warn}"
     )
 
@@ -2270,8 +2273,20 @@ def pm_rule_label(rule: dict, num: int | None = None) -> str:
     mark = "✅" if rule["enabled"] else "🚫"
     chat = "" if rule["chat_id"] is not None else " 🔕"
     prefix = f"№{num} " if num is not None else ""
+    pairs = "все пары" if rule.get("all_pairs") else f"пар {prime_db.count_pairs(rule['id'])}"
+    pace = f" · темп≤{prime_signals.fmt_pace(rule['zapas'])}" if rule.get("zapas") is not None else ""
     return (f"{prefix}{mark} {prime_signals.market_label(rule['market'])} · мин {rule['minute']} · "
-            f"пар {prime_db.count_pairs(rule['id'])}{chat}")
+            f"{pairs}{pace}{chat}")
+
+
+def pm_pace_formula(rule: dict) -> str:
+    """Формула темпа для минуты набора: '2×сумма − линия' на 24-й, '4/3×сумма − линия' на 36-й."""
+    from fractions import Fraction
+    who = "сумма" if rule["market"] == "tm" else "очки К1"
+    m = rule["minute"] or 1
+    k = Fraction(prime_db.GAME_MINUTES, m)
+    coef = str(k.numerator) if k.denominator == 1 else f"{k.numerator}/{k.denominator}"
+    return f"{coef}×{who} − линия"
 
 
 def pmrules_text() -> str:
@@ -2305,8 +2320,16 @@ def pmrule_kb(rule: dict) -> InlineKeyboardMarkup:
                               callback_data=f"pmrsched:{rid}")],
         [InlineKeyboardButton(f"📅 Дни: {prime_signals.fmt_weekdays(rule)}",
                               callback_data=f"pmrdays:{rid}")],
-        [InlineKeyboardButton(f"☑️ Пары (отмечено {prime_db.count_pairs(rid)})",
-                              callback_data=f"pmpairs:{rid}")],
+        [InlineKeyboardButton(
+            f"📐 Темп: ≤ {prime_signals.fmt_pace(rule['zapas'])}" if rule.get("zapas") is not None
+            else "📐 Темп: выкл", callback_data=f"pmzap:{rid}")],
+        [InlineKeyboardButton(f"🌐 Все пары: {'вкл' if rule.get('all_pairs') else 'выкл'}",
+                              callback_data=f"pmallp:{rid}")],
+        [InlineKeyboardButton(f"1️⃣ Один сигнал на матч: {'вкл' if rule.get('one_per_match') else 'выкл'}",
+                              callback_data=f"pmone:{rid}")],
+        [InlineKeyboardButton(
+            "☑️ Пары: все (галочки не нужны)" if rule.get("all_pairs")
+            else f"☑️ Пары (отмечено {prime_db.count_pairs(rid)})", callback_data=f"pmpairs:{rid}")],
         [InlineKeyboardButton("🗑 Удалить набор", callback_data=f"pmdel_ask:{rid}")],
         [InlineKeyboardButton("⬅️ К наборам", callback_data="pmrules")],
     ])
@@ -2326,7 +2349,12 @@ def pmrule_text(rule: dict) -> str:
         f"⚙️ Чат рассылки: {chat}",
         f"⏰ Время работы: <b>{prime_signals.fmt_windows(rule)}</b>",
         f"📅 Дни недели: <b>{prime_signals.fmt_weekdays(rule)}</b>",
-        f"☑️ Отмечено пар: <b>{prime_db.count_pairs(rule['id'])}</b>",
+        ("☑️ Пары: <b>все</b>" if rule.get("all_pairs")
+         else f"☑️ Отмечено пар: <b>{prime_db.count_pairs(rule['id'])}</b>"),
+        ("📐 Темп: <b>выкл</b>" if rule.get("zapas") is None
+         else f"📐 Темп: <b>{pm_pace_formula(rule)} ≤ {prime_signals.fmt_pace(rule['zapas'])}</b>"),
+        f"1️⃣ Один сигнал на матч: <b>{'вкл' if rule.get('one_per_match') else 'выкл'}</b>"
+        + (" (пропуск, если по матчу в этот чат уже был сигнал IPBL/Prime)" if rule.get("one_per_match") else ""),
         "",
         "<b>Статистика по сборщику</b> (гипотетически, по условиям набора)",
         f"Матчей: {st['signals']} | ✅ {st['wins']} | ❌ {st['losses']} | "
@@ -5459,6 +5487,37 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Пришли <b>chat_id</b> одним сообщением, например <code>-1001234567890</code>.\n"
             "Чтобы убрать чат — пришли <code>off</code>.\nОтмена — /start", parse_mode="HTML")
 
+    elif data.startswith("pmzap:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        rule = prime_db.get_rule(rid)
+        if not rule:
+            return
+        ctx.user_data["await"] = ("pm_rule_zap", rid)
+        cur = (f"≤ {prime_signals.fmt_pace(rule['zapas'])}" if rule.get("zapas") is not None else "выкл")
+        await q.edit_message_text(
+            f"📐 <b>Фильтр темпа · {prime_signals.market_label(rule['market'])} · "
+            f"мин {rule['minute']}</b>\n"
+            f"Сейчас: <b>{cur}</b>\n\n"
+            f"Сигнал уйдёт, только если <b>{pm_pace_formula(rule)} ≤ порог</b> "
+            f"(счёт ÷ минуту × {prime_db.GAME_MINUTES} − линия). Меньше нуля — играют медленнее линии.\n"
+            "Решение принимается один раз, через 5 с после появления линии на этой минуте.\n\n"
+            "Пришли порог числом, например <code>-4</code> или <code>0</code>, "
+            "либо <code>off</code> — выключить.\nОтмена — /start", parse_mode="HTML")
+
+    elif data.startswith("pmallp:") or data.startswith("pmone:"):
+        try:
+            rid = int(data.split(":", 1)[1])
+        except ValueError:
+            return
+        if not prime_db.get_rule(rid):
+            return
+        prime_db.toggle_rule_flag(rid, "all_pairs" if data.startswith("pmallp:") else "one_per_match")
+        rule = prime_db.get_rule(rid)
+        await q.edit_message_text(pmrule_text(rule), parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
     elif data.startswith("pmrsched:"):
         try:
             rid = int(data.split(":", 1)[1])
@@ -7359,6 +7418,30 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Чат набора → <code>{cid}</code>.\n\n" + pmrule_text(rule),
             parse_mode="HTML", reply_markup=pmrule_kb(rule))
+
+    elif kind == "pm_rule_zap":
+        rid = code                                   # code здесь = id набора
+        if not prime_db.get_rule(rid):
+            ctx.user_data.pop("await", None)
+            return
+        low = raw.strip().lower()
+        if low in ("off", "-", "выкл", "нет"):
+            value = None
+        else:
+            try:
+                value = float(low.replace(",", ".").replace("−", "-").replace("–", "-"))
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Порог — число, например <code>-4</code>, или <code>off</code>.",
+                    parse_mode="HTML")
+                return
+        prime_db.update_rule_zapas(rid, value)
+        ctx.user_data.pop("await", None)
+        rule = prime_db.get_rule(rid)
+        msg = ("✅ Фильтр темпа выключен." if value is None
+               else f"✅ Темп: {pm_pace_formula(rule)} ≤ {prime_signals.fmt_pace(value)}.")
+        await update.message.reply_text(msg + "\n\n" + pmrule_text(rule),
+                                        parse_mode="HTML", reply_markup=pmrule_kb(rule))
 
     elif kind == "pm_rule_sched":
         rid = code                                   # code здесь = id набора

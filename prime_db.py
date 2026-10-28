@@ -7,7 +7,8 @@
 Таблицы:
   prime_rules       — набор: рынок (tm|it1) + минута + вкл/выкл + СВОЙ чат рассылки
                        (chat_id) + СВОЙ график работы по часам (windows) + СВОИ дни
-                       недели (weekdays);
+                       недели (weekdays) + фильтр темпа (zapas) + «все пары» (all_pairs)
+                       + «один сигнал на матч в чат» (one_per_match);
   prime_rule_pairs  — галочки пар набора (нормализованная пара команд);
   prime_signals     — отправленные сигналы + дорасчёт (result + won + profit).
 
@@ -21,6 +22,9 @@ from pathlib import Path
 from config import (PRIME_STRAT_DB, PRIME_STRAT_SOURCE_DB, BANKROLL_START, STAKE)
 
 DIR = Path(__file__).parent
+
+# Длина матча Prime в игровых минутах (4 четверти по 12) — для темпа.
+GAME_MINUTES = 48
 
 
 def _path(db: str) -> str:
@@ -49,6 +53,19 @@ def pair_label(a: str, b: str) -> str:
     return f"{a} — {b}"
 
 
+def calc_pace(market: str, s1, s2, minute, line) -> float | None:
+    """Темп относительно линии: счёт / минута × 48 − линия.
+
+    ТМ считается по сумме очков, ИТМ1 — по очкам хозяев. На 24-й минуте это ровно
+    формула IPBL «2×сумма − линия», на 36-й — «4/3×сумма − линия». Меньше нуля —
+    команды набирают медленнее, чем заложено в линию. None — не посчитать
+    (нет счёта/линии или минута 0)."""
+    if s1 is None or s2 is None or line is None or not minute:
+        return None
+    score = (s1 + s2) if market == "tm" else s1
+    return round(score / minute * GAME_MINUTES - float(line), 2)
+
+
 # --- инициализация ---------------------------------------------------------
 
 def init_db():
@@ -62,6 +79,9 @@ def init_db():
             chat_id    INTEGER,                     -- свой чат рассылки набора (NULL = не задан)
             windows    TEXT,                        -- график работы 'HH:MM-HH:MM,...' (NULL = круглосуточно)
             weekdays   TEXT,                        -- дни недели CSV '0..6' Пн..Вс (NULL/'' = все дни)
+            zapas      REAL,                        -- фильтр темпа: сигнал при calc_pace ≤ zapas (NULL = выкл)
+            all_pairs  INTEGER NOT NULL DEFAULT 0,  -- 1 = любая пара (галочки не нужны)
+            one_per_match INTEGER NOT NULL DEFAULT 0, -- 1 = не слать, если по матчу уже был сигнал в этот чат
             created_at TEXT NOT NULL
         );
 
@@ -96,6 +116,8 @@ def init_db():
             final_score TEXT,
             final_total INTEGER,
             profit      REAL,                        -- ₽ по сигналу (NULL пока не дорассчитан)
+            pace        REAL,                        -- темп на момент сигнала (если у набора фильтр темпа)
+            zapas       REAL,                        -- порог темпа набора на момент сигнала
             created_at  TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_prime_sig_unique
@@ -108,6 +130,9 @@ def init_db():
         ("chat_id",  "ALTER TABLE prime_rules ADD COLUMN chat_id INTEGER"),
         ("windows",  "ALTER TABLE prime_rules ADD COLUMN windows TEXT"),
         ("weekdays", "ALTER TABLE prime_rules ADD COLUMN weekdays TEXT"),
+        ("zapas",    "ALTER TABLE prime_rules ADD COLUMN zapas REAL"),
+        ("all_pairs", "ALTER TABLE prime_rules ADD COLUMN all_pairs INTEGER NOT NULL DEFAULT 0"),
+        ("one_per_match", "ALTER TABLE prime_rules ADD COLUMN one_per_match INTEGER NOT NULL DEFAULT 0"),
     ):
         if col not in cols:
             conn.execute(ddl)
@@ -117,6 +142,8 @@ def init_db():
     for col, ddl in (
         ("mirror_chat_id",    "ALTER TABLE prime_signals ADD COLUMN mirror_chat_id INTEGER"),
         ("mirror_message_id", "ALTER TABLE prime_signals ADD COLUMN mirror_message_id INTEGER"),
+        ("pace",  "ALTER TABLE prime_signals ADD COLUMN pace REAL"),
+        ("zapas", "ALTER TABLE prime_signals ADD COLUMN zapas REAL"),
     ):
         if col not in scols:
             conn.execute(ddl)
@@ -269,6 +296,30 @@ def update_rule_weekdays(rule_id: int, weekdays: str | None):
     conn.close()
 
 
+def update_rule_zapas(rule_id: int, zapas: float | None):
+    """Порог темпа набора (calc_pace ≤ zapas). None — фильтр выключен."""
+    conn = _conn()
+    conn.execute("UPDATE prime_rules SET zapas=? WHERE id=?", (zapas, rule_id))
+    conn.commit()
+    conn.close()
+
+
+def toggle_rule_flag(rule_id: int, flag: str) -> bool:
+    """Переключает флаг набора all_pairs | one_per_match. Возвращает новое состояние."""
+    if flag not in ("all_pairs", "one_per_match"):
+        raise ValueError(flag)
+    conn = _conn()
+    row = conn.execute(f"SELECT {flag} FROM prime_rules WHERE id=?", (rule_id,)).fetchone()
+    if row is None:
+        conn.close()
+        return False
+    new_state = 0 if row[flag] else 1
+    conn.execute(f"UPDATE prime_rules SET {flag}=? WHERE id=?", (new_state, rule_id))
+    conn.commit()
+    conn.close()
+    return bool(new_state)
+
+
 def rules_without_chat() -> list[dict]:
     """Наборы без заданного чата — для миграции старых чатов рынка в чат набора."""
     conn = _conn()
@@ -349,6 +400,16 @@ def signal_exists(rule_id: int, event_id: int) -> bool:
     return row is not None
 
 
+def event_signaled_to_chat(event_id: int, chat_id: int, exclude_rule: int) -> bool:
+    """По матчу уже уходил сигнал ДРУГОГО набора Prime в этот же чат."""
+    conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM prime_signals WHERE event_id=? AND chat_id=? AND rule_id<>? "
+        "AND status='sent'", (event_id, chat_id, exclude_rule)).fetchone()
+    conn.close()
+    return row is not None
+
+
 def insert_signal(sig: dict) -> int | None:
     conn = _conn()
     try:
@@ -356,12 +417,12 @@ def insert_signal(sig: dict) -> int | None:
             INSERT INTO prime_signals
                 (rule_id, event_id, league, market, minute, fired_minute, team1, team2,
                  line, odds, score1, score2, chat_id, message_id, status,
-                 result, won, final_score, final_total, profit, created_at)
+                 result, won, final_score, final_total, profit, pace, zapas, created_at)
             VALUES
                 (:rule_id, :event_id, :league, :market, :minute, :fired_minute, :team1, :team2,
                  :line, :odds, :score1, :score2, :chat_id, :message_id, :status,
-                 :result, :won, :final_score, :final_total, :profit, :created_at)
-        """, sig)
+                 :result, :won, :final_score, :final_total, :profit, :pace, :zapas, :created_at)
+        """, {"pace": None, "zapas": None, **sig})
         conn.commit()
         return cur.lastrowid
     except sqlite3.IntegrityError:
@@ -457,8 +518,16 @@ _COLLECTOR_FIELDS = {
 }
 
 
+def _pace_ok(market: str, row, minute: int, zapas: float | None) -> bool:
+    """Проходит ли снимок сборщика фильтр темпа набора (zapas=None — фильтра нет)."""
+    if zapas is None:
+        return True
+    pace = calc_pace(market, row["score1"], row["score2"], minute, row["line"])
+    return pace is not None and pace <= zapas
+
+
 def pair_stats_from_collector(market: str, team1: str, team2: str,
-                              minute: int) -> dict:
+                              minute: int, zapas: float | None = None) -> dict:
     """Статистика встреч пары в рынке по СБОРЩИКУ (prime_markets.db).
 
     В отличие от pair_stats() (только отправленные сигналы, ~единицы встреч),
@@ -469,6 +538,7 @@ def pair_stats_from_collector(market: str, team1: str, team2: str,
     рассчитанным исходом «меньше» рынка и считаем гипотетическую флэт-ставку STAKE
     по кф снимка: Выигрыш -> +STAKE*(кф-1), Проигрыш -> -STAKE. Возврат/нерасчёт
     (result NULL) в счёт не идут. Порядок команд не важен (norm_pair).
+    zapas — если у набора фильтр темпа, учитываются только матчи, где он прошёл.
     """
     fields = _COLLECTOR_FIELDS.get(market)
     if fields is None:
@@ -478,7 +548,8 @@ def pair_stats_from_collector(market: str, team1: str, team2: str,
     try:
         conn = _source_conn()
         rows = conn.execute(
-            f"SELECT team1, team2, {odds_f} AS odds, {res_f} AS res, MAX(id) "
+            f"SELECT team1, team2, {odds_f} AS odds, {res_f} AS res, {line_f} AS line, "
+            "score1, score2, MAX(id) "
             "FROM market_snapshots "
             f"WHERE game_minute=? AND {res_f} IN ('Выигрыш', 'Проигрыш') "
             "GROUP BY event_id", (minute,)).fetchall()
@@ -489,6 +560,8 @@ def pair_stats_from_collector(market: str, team1: str, team2: str,
     profit = 0.0
     for r in rows:
         if norm_pair(r["team1"], r["team2"]) != target:
+            continue
+        if not _pace_ok(market, r, minute, zapas):
             continue
         count += 1
         if r["res"] == "Выигрыш":
@@ -504,7 +577,8 @@ def pair_stats_from_collector(market: str, team1: str, team2: str,
 
 def rule_stats_from_collector(rule: dict) -> dict:
     """Гипотетическая статистика набора по СБОРЩИКУ (prime_markets.db) — по условиям
-    набора (рынок + минута + отмеченные пары), а НЕ по реально отправленным сигналам.
+    набора (рынок + минута + отмеченные пары или «все пары» + фильтр темпа), а НЕ по
+    реально отправленным сигналам.
 
     По ВСЕМ матчам отмеченных пар на игровой минуте набора берём последний снимок
     минуты (MAX(id)) с рассчитанным исходом рынка и считаем флэт STAKE по кф снимка:
@@ -517,11 +591,13 @@ def rule_stats_from_collector(rule: dict) -> dict:
     if fields is None:
         return empty
     line_f, odds_f, res_f = fields
-    sel = get_rule_pairs(rule["id"])
+    all_pairs = bool(rule.get("all_pairs"))
+    sel = set() if all_pairs else get_rule_pairs(rule["id"])
     try:
         conn = _source_conn()
         rows = conn.execute(
-            f"SELECT team1, team2, {odds_f} AS odds, {res_f} AS res, MAX(id) "
+            f"SELECT team1, team2, {odds_f} AS odds, {res_f} AS res, {line_f} AS line, "
+            "score1, score2, MAX(id) "
             "FROM market_snapshots WHERE game_minute=? GROUP BY event_id",
             (rule["minute"],)).fetchall()
         conn.close()
@@ -530,10 +606,12 @@ def rule_stats_from_collector(rule: dict) -> dict:
     wins = losses = pushes = no_result = 0
     profit = 0.0
     for r in rows:
-        if norm_pair(r["team1"], r["team2"]) not in sel:
+        if not all_pairs and norm_pair(r["team1"], r["team2"]) not in sel:
             continue
         if r["odds"] is None:
             continue                       # рынок не котировался на минуте — не учитываем
+        if not _pace_ok(rule["market"], r, rule["minute"], rule.get("zapas")):
+            continue
         res = r["res"]
         if res == "Выигрыш":
             wins += 1

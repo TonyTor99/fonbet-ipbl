@@ -3,10 +3,17 @@
 Наборы задаются кнопками бота (prime_db): рынок (ТМ|ИТМ1) + минута + СВОЙ чат
 рассылки + СВОЙ график работы по часам + СВОИ дни недели + галочки пар.
 Срабатывание: на СТРОГО заданной игровой минуте матча Prime муж, если пара матча
-отмечена в наборе И сейчас попадает в график/дни набора (rule_active_now) — берём
-текущую КРАЙНЮЮ линию рынка (та же, что пишет сборщик: collector.extract_markets) и
-шлём один сигнал на матч на набор (дедуп через БД) в ЧАТ НАБОРА (prime_rules.chat_id).
-Фильтра по значению линии нет. Без чата сигнал пишется в БД, но не отправляется.
+отмечена в наборе (или у набора «все пары») И сейчас попадает в график/дни набора
+(rule_active_now) — берём текущую КРАЙНЮЮ линию рынка (та же, что пишет сборщик:
+collector.extract_markets) и шлём один сигнал на матч на набор (дедуп через БД) в ЧАТ
+НАБОРА (prime_rules.chat_id). Фильтра по значению линии нет. Без чата сигнал пишется
+в БД, но не отправляется.
+
+Фильтр темпа (prime_rules.zapas): сигнал, только если счёт / минута × 48 − линия ≤ zapas
+(prime_db.calc_pace). Решение принимается ОДИН раз на матч — через SETTLE_SEC после
+появления линии на минуте набора (линия на старте перерыва ещё «дрожит»).
+«Один сигнал на матч» (one_per_match): не слать, если по матчу в этот же чат уже ушёл
+сигнал набора IPBL или другого набора Prime.
 
 На финале — дорасчёт по счёту основного времени:
   ТМ:   зашло, если (s1 + s2) < линия; пуш (Возврат), если равно;
@@ -16,9 +23,11 @@
 """
 import html
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 
 import collector
+import database
 import prime_db
 import signals
 import tg_notify
@@ -41,6 +50,12 @@ MARKET_FIELD = {
     "tm":  ("total_line", "total_m_odds"),
     "it1": ("it1_line", "it1_m_odds"),
 }
+
+# Наборы с фильтром темпа: ждём столько секунд после появления линии на минуте
+# набора, потом считаем темп ОДИН раз и больше по этому матчу не пересчитываем.
+SETTLE_SEC = 5.0
+_first_seen: dict[tuple[int, int], float] = {}   # (набор, матч) -> monotonic первой линии
+_decided: set[tuple[int, int]] = set()           # (набор, матч) — решение по матчу принято
 
 
 def market_label(code: str) -> str:
@@ -136,9 +151,13 @@ def fmt_stats(st: dict) -> str:
     return f"📈 <b>Статистика {st['count']}/{st['roi']:.0f}%/{st['profit']:.0f}</b>"
 
 
+def fmt_pace(v) -> str:
+    return f"{float(v):+.1f}".replace(".", ",")
+
+
 def render_signal(sig: dict) -> str:
     st = prime_db.pair_stats_from_collector(
-        sig["market"], sig["team1"], sig["team2"], sig["minute"])
+        sig["market"], sig["team1"], sig["team2"], sig["minute"], sig.get("zapas"))
     lines = [
         "🏀 <b>PRIME · СИГНАЛ</b>",
         fmt_teams(sig["team1"], sig["team2"]),
@@ -146,6 +165,10 @@ def render_signal(sig: dict) -> str:
         "",
         f"⏱ <b>Минута {sig['minute']}</b>",
         f"📊 <b>Счёт {sig['score1']}:{sig['score2']}</b>",
+    ]
+    if sig.get("pace") is not None:
+        lines.append(f"📐 <b>Темп {fmt_pace(sig['pace'])}</b> (порог ≤ {fmt_pace(sig['zapas'])})")
+    lines += [
         "",
         f"🎯 <b>Ставка {market_label(sig['market'])} {fmt_num(sig['line'])} "
         f"@{fmt_num(sig['odds'])}</b>",
@@ -181,9 +204,14 @@ def process_match(state: dict, api_data):
     for rule in rules:
         if not rule_active_now(rule):
             continue  # вне графика работы / дня недели набора — молчим
-        if pair not in prime_db.get_rule_pairs(rule["id"]):
+        if not rule.get("all_pairs") and pair not in prime_db.get_rule_pairs(rule["id"]):
             continue
-        if prime_db.signal_exists(rule["id"], eid):
+        key = (rule["id"], eid)
+        if key in _decided or prime_db.signal_exists(rule["id"], eid):
+            continue
+        if rule.get("one_per_match") and _match_signaled(rule, eid):
+            _decided.add(key)
+            log.info("PRIME rule=%s ev=%s skip: по матчу уже был сигнал в этот чат", rule["id"], eid)
             continue
         if not markets:
             continue  # рынков нет в этом цикле — попробуем на след., минута ещё та же
@@ -192,13 +220,35 @@ def process_match(state: dict, api_data):
         odds = markets.get(odds_f)
         if line is None or odds is None:
             continue  # нужный рынок ещё не появился — ждём следующий цикл этой минуты
+        pace = None
+        if rule.get("zapas") is not None:
+            t0 = _first_seen.setdefault(key, time.monotonic())
+            if time.monotonic() - t0 < SETTLE_SEC:
+                continue  # линия на старте перерыва ещё «дрожит» — ждём
+            _decided.add(key)  # темп считаем один раз на матч
+            pace = prime_db.calc_pace(rule["market"], state.get("score1"), state.get("score2"),
+                                      minute, line)
+            if pace is None or pace > rule["zapas"]:
+                log.info("PRIME rule=%s ev=%s skip: темп %s > %s (линия %s, счёт %s:%s)",
+                         rule["id"], eid, pace, rule["zapas"], line,
+                         state.get("score1"), state.get("score2"))
+                continue
         try:
-            _fire(rule, state, line, odds)
+            _fire(rule, state, line, odds, pace)
         except Exception as e:
             log.warning("fire err rule=%s ev=%s: %s", rule["id"], eid, e)
 
 
-def _fire(rule: dict, state: dict, line: float, odds: float):
+def _match_signaled(rule: dict, event_id: int) -> bool:
+    """По матчу уже уходил сигнал в чат набора: от набора IPBL или другого набора Prime."""
+    chat_id = rule.get("chat_id")
+    if chat_id is None:
+        return False
+    return (database.ipbl_event_sent_to_chat(event_id, chat_id)
+            or prime_db.event_signaled_to_chat(event_id, chat_id, rule["id"]))
+
+
+def _fire(rule: dict, state: dict, line: float, odds: float, pace: float | None = None):
     # чат — СВОЙ у каждого набора (prime_rules.chat_id); без чата сигнал пишется в БД, но не шлётся
     chat_id = rule.get("chat_id")
     sig = {
@@ -222,6 +272,8 @@ def _fire(rule: dict, state: dict, line: float, odds: float):
         "final_score": None,
         "final_total": None,
         "profit": None,
+        "pace": pace,
+        "zapas": rule.get("zapas") if pace is not None else None,
         "created_at": _now(),
     }
     if chat_id is not None:
@@ -247,6 +299,10 @@ def resolve(event_id: int, s1: int, s2: int):
     """Дорасчёт сигналов матча по счёту основного времени."""
     final_score = f"{s1}:{s2}"
     final_total = s1 + s2
+    for key in [k for k in _first_seen if k[1] == event_id]:
+        _first_seen.pop(key, None)
+    for key in [k for k in _decided if k[1] == event_id]:
+        _decided.discard(key)
     try:
         for sig in prime_db.get_signals_for_event(event_id):
             if sig["result"] is not None or sig["line"] is None:

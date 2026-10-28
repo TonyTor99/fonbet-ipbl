@@ -984,6 +984,16 @@ def ipbl_sent_exists(rule_id: int, event_id: int) -> bool:
     return row is not None
 
 
+def ipbl_event_sent_to_chat(event_id: int, chat_id: int) -> bool:
+    """По матчу уже уходил сигнал любого набора IPBL в этот чат
+    (для «один сигнал на матч» у наборов Prime)."""
+    conn = _conn()
+    row = conn.execute("SELECT 1 FROM ipbl_sent WHERE event_id=? AND chat_id=? AND status='sent'",
+                       (event_id, chat_id)).fetchone()
+    conn.close()
+    return row is not None
+
+
 def ipbl_insert_sent(sig: dict) -> int | None:
     conn = _conn()
     try:
